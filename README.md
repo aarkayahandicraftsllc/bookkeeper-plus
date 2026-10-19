@@ -1,4 +1,25 @@
-# Bookkeeper — Tally-style double-entry bookkeeping
+# Bookkeeper Plus — double-entry bookkeeping with receivables and GST
+
+**This is a fork of [Bookkeeper](../Bookkeeper), taken at the `accounting-v1`
+tag.** That app is the accounting core and is finished: groups, ledgers,
+voucher entry, the five reports, multi-company, backups. It stays as it is.
+
+Bookkeeper Plus is where the trading features are built on top:
+
+* bill-wise receivables and payables, with ageing
+* GST — tax ledgers, rates on sales and purchase vouchers, input/output tax
+  and a GST summary
+* later, possibly: inventory, cost centres
+
+**The two are separate applications with separate books.** This one has its
+own `data/` folder, started as a copy of the other's, and its own executable
+(`BookkeeperPlus.exe`). Entering a voucher in one does not reach the other —
+decide which app holds your real books and use that one.
+
+> **Shared code, two copies.** `db.py` and `accounting.py` began identical to
+> Bookkeeper's. Fixes to the accounting core are NOT shared automatically and
+> have to be applied in both places, so keep those two files as close to the
+> original as the new features allow, rather than reorganising them.
 
 Two front ends over one set of books:
 

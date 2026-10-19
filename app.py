@@ -16,7 +16,7 @@ import streamlit as st
 import accounting as acc
 import db
 
-st.set_page_config(page_title="Bookkeeper", page_icon="📗", layout="wide")
+st.set_page_config(page_title="Bookkeeper Plus", page_icon="📗", layout="wide")
 
 # --------------------------------------------------------------------------- #
 # which company

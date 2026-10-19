@@ -2,7 +2,7 @@
 
     python build_exe.py
 
-Produces Bookkeeper.exe in this folder, BESIDE data/ — copy the two together
+Produces BookkeeperPlus.exe in this folder, BESIDE data/ — copy the two together
 anywhere and double-click. Python does not need to be installed on the machine
 that runs it.
 
@@ -13,7 +13,7 @@ each, and vouchers entered through one would be missing from the other. Point
 BOOKS_DIR elsewhere (OneDrive, a shared folder) to override.
 
 **The executable it replaces is kept.** The outgoing exe is moved to
-previous/Bookkeeper-<when it was built>.exe first, the newest KEEP_PREVIOUS are
+previous/BookkeeperPlus-<when it was built>.exe first, the newest KEEP_PREVIOUS are
 retained, and if PyInstaller fails the last good one is put straight back, so
 a bad build never leaves you without a runnable app.
 """
@@ -26,7 +26,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PREVIOUS = HERE / "previous"
-EXE_NAME = "Bookkeeper.exe"
+EXE_NAME = "BookkeeperPlus.exe"
 EXE_PATH = HERE / EXE_NAME
 
 # How many superseded builds to keep. Two rather than one: if you rebuild twice
@@ -54,7 +54,7 @@ def archive_current() -> Path | None:
     PREVIOUS.mkdir(exist_ok=True)
     stamp = datetime.fromtimestamp(current.stat().st_mtime).strftime(
         "%Y%m%d-%H%M%S")
-    kept = PREVIOUS / f"Bookkeeper-{stamp}.exe"
+    kept = PREVIOUS / f"BookkeeperPlus-{stamp}.exe"
     if kept.exists():          # same build archived twice - leave the first
         current.unlink()
         print(f"Already kept {kept.name}")
@@ -79,7 +79,7 @@ def prune_previous() -> None:
     """
     if not PREVIOUS.exists():
         return
-    archives = sorted(PREVIOUS.glob("Bookkeeper-*.exe"))
+    archives = sorted(PREVIOUS.glob("BookkeeperPlus-*.exe"))
     for stale in archives[:-KEEP_PREVIOUS] if KEEP_PREVIOUS else archives:
         try:
             stale.unlink()
@@ -106,7 +106,7 @@ def main() -> int:
 
     command = [
         sys.executable, "-m", "PyInstaller",
-        "--name", "Bookkeeper",
+        "--name", "BookkeeperPlus",
         "--onefile",
         "--windowed",                 # no console window
         "--noconfirm",
@@ -134,7 +134,7 @@ def main() -> int:
     if built.exists():
         size = built.stat().st_size / (1024 * 1024)
         print(f"\nBuilt {built}  ({size:.0f} MB)")
-    archives = sorted(PREVIOUS.glob("Bookkeeper-*.exe")) if PREVIOUS.exists() else []
+    archives = sorted(PREVIOUS.glob("BookkeeperPlus-*.exe")) if PREVIOUS.exists() else []
     if archives:
         print(f"Previous build{'s' if len(archives) > 1 else ''} kept in "
               f"previous/: {', '.join(a.name for a in archives)}")

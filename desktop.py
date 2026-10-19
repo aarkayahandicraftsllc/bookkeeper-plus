@@ -2500,7 +2500,7 @@ class MainWindow(QtWidgets.QMainWindow):
         company_menu.addSeparator()
         quit_action = QtGui.QAction("Exit\tCtrl+Q", self)
         quit_action.setShortcut(QtGui.QKeySequence("Ctrl+Q"))
-        quit_action.setToolTip("Close Bookkeeper. You will be offered a "
+        quit_action.setToolTip("Close Bookkeeper Plus. You will be offered a "
                                "backup on the way out.")
         # self.close(), NEVER app.quit(): quit tears down the event loop
         # without closing the window, so closeEvent never runs and the backup
@@ -2662,7 +2662,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Text size: {theme.TEXT_LABELS[key]} ({theme.point_size()}pt)")
 
     def _set_title(self) -> None:
-        self.setWindowTitle(f"{db.company_display_name()} — Bookkeeper")
+        self.setWindowTitle(f"{db.company_display_name()} — Bookkeeper Plus")
 
     def ask_company(self) -> None:
         """Offer the company dropdown over the open window.
@@ -2972,7 +2972,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
-    app.setApplicationName("Bookkeeper")
+    app.setApplicationName("Bookkeeper Plus")
     theme.remember_native_style(app)
     theme.remember_base_font(app)
 

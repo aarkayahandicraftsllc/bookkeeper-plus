@@ -16,13 +16,13 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-TMP = Path(tempfile.gettempdir()) / "bookkeeper_desktop_test.db"
+TMP = Path(tempfile.gettempdir()) / "bkplus_desktop_test.db"
 TMP.unlink(missing_ok=True)
 os.environ["BOOKS_DB"] = str(TMP)
 # Company files are created in BOOKS_DIR, so point it at a scratch
 # folder: without this the suite would write companies into the
 # user's real data/ directory.
-SANDBOX = Path(tempfile.gettempdir()) / f"bookkeeper_sandbox_{TMP.stem}"
+SANDBOX = Path(tempfile.gettempdir()) / f"bkplus_sandbox_{TMP.stem}"
 shutil.rmtree(SANDBOX, ignore_errors=True)
 SANDBOX.mkdir(parents=True, exist_ok=True)
 os.environ["BOOKS_DIR"] = str(SANDBOX)
@@ -70,7 +70,8 @@ check("screen names", [name.replace("&&", "&") for name, _ in window.screens],
       ["Voucher Entry", "Day Book", "Ledger", "Trial Balance", "Profit & Loss",
        "Balance Sheet", "Masters", "Company"])
 check("starts on voucher entry", window.stack.currentIndex(), 0)
-check("title names the company", "Bookkeeper" in window.windowTitle(), True)
+check("title names the company and the app",
+      "Bookkeeper Plus" in window.windowTitle(), True)
 
 print("\n2) Alt+Shift+initial switches voucher type")
 for key, name in desktop.VOUCHER_KEYS.items():

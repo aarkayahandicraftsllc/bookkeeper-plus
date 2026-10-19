@@ -13,13 +13,13 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-TMP = Path(tempfile.gettempdir()) / "bookkeeper_test.db"
+TMP = Path(tempfile.gettempdir()) / "bkplus_test.db"
 TMP.unlink(missing_ok=True)
 os.environ["BOOKS_DB"] = str(TMP)
 # Company files are created in BOOKS_DIR, so point it at a scratch
 # folder: without this the suite would write companies into the
 # user's real data/ directory.
-SANDBOX = Path(tempfile.gettempdir()) / f"bookkeeper_sandbox_{TMP.stem}"
+SANDBOX = Path(tempfile.gettempdir()) / f"bkplus_sandbox_{TMP.stem}"
 shutil.rmtree(SANDBOX, ignore_errors=True)
 SANDBOX.mkdir(parents=True, exist_ok=True)
 os.environ["BOOKS_DIR"] = str(SANDBOX)
@@ -417,7 +417,7 @@ _real_executable = sys.executable
 try:
     sys.frozen = True
     sys.executable = str(Path(tempfile.gettempdir()) / "somewhere"
-                         / "Bookkeeper.exe")
+                         / "BookkeeperPlus.exe")
     frozen_dir = db._app_dir()
     check("packaged, the anchor is the executable's folder",
           frozen_dir, Path(sys.executable).resolve().parent)
@@ -711,7 +711,7 @@ check("and the books still balance",
 print("\n20) An older book gains the column it was made without")
 # Books created before voiding existed have no `voided` column, and
 # CREATE TABLE IF NOT EXISTS will not add one. Simulate that exactly.
-legacy = Path(tempfile.gettempdir()) / "bookkeeper_legacy.db"
+legacy = Path(tempfile.gettempdir()) / "bkplus_legacy.db"
 legacy.unlink(missing_ok=True)
 import sqlite3  # noqa: E402
 from contextlib import closing  # noqa: E402

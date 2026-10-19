@@ -25,7 +25,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # every company file inside a scratch folder - without it this suite would
 # create companies in the user's real data/ directory.
 os.environ.pop("BOOKS_DB", None)
-SANDBOX = Path(tempfile.gettempdir()) / "bookkeeper_multi_company"
+SANDBOX = Path(tempfile.gettempdir()) / "bkplus_multi_company"
 shutil.rmtree(SANDBOX, ignore_errors=True)
 SANDBOX.mkdir(parents=True)
 os.environ["BOOKS_DIR"] = str(SANDBOX)
