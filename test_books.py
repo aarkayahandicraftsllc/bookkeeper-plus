@@ -248,6 +248,31 @@ check("a worked-out figure stays a single line, with nothing under it",
        if p.startswith(acc.DETAIL_INDENT)
        and "Profit & Loss" in p], [])
 
+# Editing a group MOVES its balances between statements - that is the point
+# of being allowed to edit one, and the thing most worth proving.
+db.add_group("Deposits Held", "Current Assets")
+db.add_ledger("Rent Deposit", "Deposits Held", 20_000, "Dr")
+check("a new group's ledger lands on the side it was created under",
+      float(acc.balance_sheet()["assets"].set_index("Particulars")
+            .loc["Current Assets", "Amount"]), 487_000.0)
+db.update_group("Deposits Held", "Deposits Held", "Current Liabilities")
+after = acc.balance_sheet()
+check("moving the group moves the balance to the other side",
+      float(after["assets"].set_index("Particulars")
+            .loc["Current Assets", "Amount"]), 467_000.0)
+check("its nature followed the move",
+      str(db.get_groups().set_index("name").loc["Deposits Held", "nature"]),
+      "liability")
+check("and the sheet still balances",
+      after["totals"]["difference"], 0.0, tol=0.0)
+# Put it back, so the figures the later sections assert are undisturbed.
+db.update_group("Deposits Held", "Deposits Held", "Current Assets")
+db.delete_ledger(db.ledger_id("Rent Deposit"))
+db.delete_group("Deposits Held")
+check("the books are as they were",
+      float(acc.balance_sheet()["assets"].set_index("Particulars")
+            .loc["Current Assets", "Amount"]), 467_000.0)
+
 print("\n10) A ledger statement reads like Tally's")
 st = acc.ledger_statement(db.ledger_id("Bank of India"))
 check("opening", st["opening"], 200_000.0)

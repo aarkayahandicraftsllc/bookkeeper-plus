@@ -222,7 +222,7 @@ window.masters.led_name.setText("Petty Cash")
 window.masters.led_group.setCurrentText("Cash-in-hand")
 window.masters.led_open.setValue(2_500)
 window.masters.led_side.setCurrentText("Dr")
-window.masters.create_ledger()
+window.masters.save_ledger()
 check("the ledger exists", "Petty Cash" in set(db.get_ledgers()["name"]), True)
 check("masters shows it",
       window.masters.ledger_table.rowCount(), 8 + len(db.GST_LEDGERS))
@@ -1110,11 +1110,52 @@ for index, title in REPORTS.items():
           csv_text.splitlines()[:3],
           [report.title, db.company_display_name(), report.period])
     book = openpyxl.load_workbook(db.DATA_DIR / report.filename(".xlsx"))
-    check(f"{title}: the workbook has a sheet per table",
-          len(book.sheetnames), len(report.sections))
+    # A two-sided statement is ONE sheet, read left and right; everything
+    # else keeps a sheet per table.
+    check(f"{title}: the workbook is laid out as the report asks",
+          len(book.sheetnames),
+          1 if report.side_by_side else len(report.sections))
     check(f"{title}: each sheet is headed with the company",
           book[book.sheetnames[0]]["A1"].value, db.company_display_name())
     book.close()
+
+# The balance sheet exports as ONE sheet, read left and right (user asked
+# 2026-10-20: "not in 2 seperate sheets, it should be in one sheet and looks
+# more professional"). Two sheets meant holding one side in your head while
+# looking at the other.
+window.show_screen([n for n, _ in window.screens].index("Balance Sheet"))
+settle()
+sides_path = db.DATA_DIR / "sides.xlsx"
+desktop.export_report(window.sheet.report(), path=str(sides_path))
+book = openpyxl.load_workbook(sides_path)
+sides = book[book.sheetnames[0]]
+check("one sheet, not one per side", len(book.sheetnames), 1)
+check("headed with the company", sides["A1"].value, db.company_display_name())
+check("then what the report is", sides["A2"].value, "Balance Sheet")
+check("then when it is drawn at", "as at" in str(sides["A3"].value), True)
+check("the two sides sit beside each other",
+      [sides["A5"].value, sides["D5"].value], ["Liabilities", "Assets"])
+check("with a figures column each",
+      [sides["B5"].value, sides["E5"].value], ["Amount", "Amount"])
+totals_at = [r for r in range(1, sides.max_row + 1)
+             if sides.cell(row=r, column=1).value == "Total"]
+check("each side is ruled off and totalled", len(totals_at), 1)
+check("and the totals agree with the statement",
+      [sides.cell(row=totals_at[0], column=c).value for c in (2, 5)],
+      [window.sheet.report().totals["Liabilities"],
+       window.sheet.report().totals["Assets"]])
+check("the total is emphasised",
+      sides.cell(row=totals_at[0], column=1).font.bold, True)
+# Still numbers with a format, never formatted text - the layout got smarter,
+# the principle did not change.
+# int, not float, when the figure is whole - openpyxl narrows it on the way
+# back in. What matters is that it is a NUMBER and not text.
+check("amounts are numbers",
+      isinstance(sides["B6"].value, (int, float))
+      and not isinstance(sides["B6"].value, bool), True)
+check("carrying a money format", sides["B6"].number_format, "#,##0.00")
+check("and the gridlines are off", sides.sheet_view.showGridLines, False)
+book.close()
 
 # Figures stay NUMBERS in a spreadsheet so they can be summed on arrival; a
 # column of "1,234.00" strings is a file you have to repair before using.
@@ -1565,6 +1606,192 @@ if billed:
           [b for r in v.row_values() for b in r.get("bills", [])], [])
     v.reset()
     settle()
+
+print("\n23d) The next line is offered the balancing amount")
+db.use_company(TMP)
+v = window.voucher
+window.show_screen(0)
+v.reset()
+settle()
+v.grid.cellWidget(0, 0).setCurrentText("Rent")
+v.grid.item(0, 1).setText("1,000.00")
+settle()
+check("the line below is offered the other side",
+      v.grid.item(1, 2).text(), "1,000.00")
+check("and nothing in its debit column", v.grid.item(1, 1).text(), "")
+check("it counts as a suggestion, not as typing",
+      v.grid.item(1, 2).data(desktop.SUGGESTED), True)
+
+# "unless i change it to make it a multiline journal": taking 400 of the
+# 1,000 must leave 600 offered on the line after, not 1,000 again.
+v.grid.item(1, 2).setText("400")
+settle()
+check("overwriting it leaves the remainder below",
+      v.grid.item(2, 2).text(), "600.00")
+check("and the line taken over is no longer a suggestion",
+      v.grid.item(1, 2).data(desktop.SUGGESTED), None)
+
+# A figure entered by hand is never moved or erased.
+v.grid.item(2, 2).setText("600")
+settle()
+v.grid.cellWidget(1, 0).setCurrentText("Cash")
+v.grid.cellWidget(2, 0).setCurrentText("Bank")
+settle()
+check("the voucher balances on what was entered",
+      round(sum(r["debit"] - r["credit"] for r in v.row_values()), 2), 0.0)
+check("three lines, as typed", len(v.row_values()), 3)
+v.grid.item(0, 1).setText("1,000.00")        # retype the same figure
+settle()
+check("re-entering the same amount disturbs nothing typed",
+      [v.grid.item(1, 2).text(), v.grid.item(2, 2).text()],
+      ["400", "600"])
+
+# A suggestion that is no longer needed is withdrawn, not left to be read as
+# a figure.
+v.reset()
+settle()
+v.grid.cellWidget(0, 0).setCurrentText("Rent")
+v.grid.item(0, 1).setText("250")
+settle()
+check("a suggestion appears", v.grid.item(1, 2).text(), "250.00")
+v.grid.item(0, 1).setText("")
+settle()
+check("and is withdrawn when the amount above goes away",
+      v.grid.item(1, 2).text(), "")
+v.reset()
+settle()
+
+print("\n23e) Editing a ledger and a group in Masters")
+m = window.masters
+# By name, not by number: the fork has two more screens before Masters.
+window.show_screen([n for n, _ in window.screens].index("Masters"))
+settle()
+check("the form creates by default", m.led_save.text(), "Create ledger")
+
+# A ledger is picked by its row, which is the key the table carries.
+rows = {m.ledger_table.item(r, 0).text(): r
+        for r in range(m.ledger_table.rowCount())}
+m.ledger_table.setCurrentCell(rows["Petty Cash"], 0)
+m.edit_ledger()
+settle()
+check("editing fills the form from the ledger", m.led_name.text(), "Petty Cash")
+check("the button now saves instead", m.led_save.text(), "Save changes")
+check("and says which ledger it is on", "Petty Cash" in m.led_hint.text(), True)
+m.led_name.setText("Petty Cash Box")
+m.led_open.setValue(3_000)
+m.save_ledger()
+settle()
+check("the ledger was renamed",
+      "Petty Cash Box" in set(db.get_ledgers()["name"]), True)
+check("and the old name is gone",
+      "Petty Cash" in set(db.get_ledgers()["name"]), False)
+check("with the new opening balance",
+      float(db.get_ledgers().set_index("name").loc["Petty Cash Box",
+                                                   "opening"]), 3_000.0)
+check("the form goes back to creating", m.led_save.text(), "Create ledger")
+
+# A reserved ledger is looked up by NAME by the reports, so it cannot be
+# renamed - and the refusal has to be a message, not a crash.
+rows = {m.ledger_table.item(r, 0).text(): r
+        for r in range(m.ledger_table.rowCount())}
+m.ledger_table.setCurrentCell(rows["Cash"], 0)
+m.edit_ledger()
+settle()
+try:
+    db.update_ledger(db.ledger_id("Cash"), "Cash Box", "Cash-in-hand", 0, "Dr")
+    check("renaming a reserved ledger is refused", "allowed", "refused")
+except ValueError as exc:
+    check("renaming a reserved ledger is refused", "refused", "refused")
+    check("and says why", "reserved" in str(exc), True)
+check("but its opening balance can be changed",
+      db.update_ledger(db.ledger_id("Cash"), "Cash", "Cash-in-hand",
+                       75, "Dr"), None)
+m.stop_editing_ledger()
+settle()
+
+# Groups: a custom one can be renamed and moved; the reserved 27 cannot.
+db.add_group("Scooter Loan", "Loans (Liability)")
+m.refresh()
+settle()
+grows = {m.group_table.item(r, 0).text(): r
+         for r in range(m.group_table.rowCount())}
+m.group_table.setCurrentCell(grows["Scooter Loan"], 0)
+m.edit_group()
+settle()
+check("editing fills the group form", m.grp_name.text(), "Scooter Loan")
+m.grp_name.setText("Two-wheeler Loan")
+m.grp_parent.setCurrentText("Current Liabilities")
+m.save_group()
+settle()
+moved = db.get_groups().set_index("name")
+check("the group was renamed and moved",
+      str(moved.loc["Two-wheeler Loan", "parent_name"]), "Current Liabilities")
+check("its nature follows the group it moved under",
+      str(moved.loc["Two-wheeler Loan", "nature"]), "liability")
+
+grows = {m.group_table.item(r, 0).text(): r
+         for r in range(m.group_table.rowCount())}
+m.group_table.setCurrentCell(grows["Fixed Assets"], 0)
+m.edit_group()
+settle()
+check("a reserved group refuses to be edited at all",
+      m.grp_save.text(), "Create group")
+for label, call in (
+    ("renaming a reserved group",
+     lambda: db.update_group("Fixed Assets", "Assets Fixed")),
+    ("putting a group under itself",
+     lambda: db.update_group("Two-wheeler Loan", "Two-wheeler Loan",
+                             "Two-wheeler Loan")),
+):
+    try:
+        call()
+        check(f"{label} is refused", "allowed", "refused")
+    except ValueError:
+        check(f"{label} is refused", "refused", "refused")
+
+# A cycle is the one that would break the reports silently, so it is built
+# for real: a child cannot become its own parent's parent.
+db.add_group("Under Two-wheeler", "Two-wheeler Loan")
+try:
+    db.update_group("Two-wheeler Loan", "Two-wheeler Loan", "Under Two-wheeler")
+    check("a group cannot move under its own child", "allowed", "refused")
+except ValueError:
+    check("a group cannot move under its own child", "refused", "refused")
+check("the tree is still a tree",
+      db.primary_group("Under Two-wheeler"), "Current Liabilities")
+
+print("\n23f) Saving an alteration goes back to the report")
+db.use_company(TMP)
+# Saving an alteration returns to the report it was opened from (user asked
+# 2026-10-20): you were reading the Day Book and went to fix a line, so
+# landing back on an empty voucher form loses your place.
+window.show_screen(1)
+window.daybook.refresh()
+settle()
+window._alter(int(window.daybook.table.key_at(0)))
+settle()
+check("altering takes you to voucher entry", window.stack.currentIndex(), 0)
+window.voucher.accept_voucher()
+settle()
+check("and saving it brings you back to the Day Book",
+      window.stack.currentIndex(), 1)
+check("the memory of where it came from is spent",
+      window._altered_from, None)
+
+# A NEW voucher must NOT jump: there you are entering a run of them, and
+# being thrown onto a report after each one would be worse than useless.
+window.show_screen(0)
+settle()
+voucher_rows = window.voucher
+voucher_rows.grid.cellWidget(0, 0).setCurrentText("Rent")
+voucher_rows.grid.item(0, 1).setText("12.00")
+voucher_rows.grid.cellWidget(1, 0).setCurrentText("Cash")
+settle()
+voucher_rows.accept_voucher()
+settle()
+check("a new voucher leaves you on voucher entry",
+      window.stack.currentIndex(), 0)
+
 
 print("\n24) The shortcuts actually fire, pressed for real")
 # Binding a key is not the same as the key working, which is the whole lesson

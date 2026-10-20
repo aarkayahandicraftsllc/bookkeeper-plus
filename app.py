@@ -890,6 +890,44 @@ with tab_masters:
                          "is_reserved": "Reserved"}),
         hide_index=True, width="stretch", height=table_height(len(groups), 12))
 
+    editable = groups[groups["is_reserved"] == 0]
+    with st.expander("✏️ Alter a group"):
+        if editable.empty:
+            st.caption("No groups of your own yet — the reserved 27 are built "
+                       "into every report by name, so they cannot be altered.")
+        else:
+            picked = st.selectbox("Group", list(editable["name"]),
+                                  key="alt_grp_pick")
+            was = editable.set_index("name").loc[picked]
+            a1, a2 = st.columns(2)
+            with a1:
+                alt_grp_name = st.text_input("Name", value=picked,
+                                             key="alt_grp_name")
+            with a2:
+                # A group may not sit under itself or under anything beneath
+                # it; the data layer refuses either, and leaving them out of
+                # the list means the refusal is rarely needed.
+                beneath = {n for n, chain in
+                           ((str(r.name), db.group_lineage().get(int(r.id), []))
+                            for r in groups.itertuples())
+                           if picked in chain}
+                choices = [n for n in group_names if n not in beneath]
+                parent_now = ("" if pd.isna(was["parent_name"])
+                              else str(was["parent_name"]))
+                alt_grp_parent = st.selectbox(
+                    "Under", choices,
+                    index=choices.index(parent_now) if parent_now in choices
+                    else 0, key="alt_grp_parent")
+            st.caption("Moving a group moves its ledgers' balances with it, "
+                       "and its nature follows the group it lands under.")
+            if st.button("Save group", key="alt_grp_save"):
+                try:
+                    db.update_group(picked, alt_grp_name, alt_grp_parent)
+                    flash(f"Group {picked!r} saved.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
     with st.expander("➕ Create a sub-group"):
         g1, g2 = st.columns(2)
         with g1:

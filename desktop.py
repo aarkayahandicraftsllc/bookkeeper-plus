@@ -132,6 +132,11 @@ def parse_amount(text: str) -> float:
 # happened to land on that line. The key travels with the row instead.
 ROW_KEY = int(QtCore.Qt.ItemDataRole.UserRole) + 1
 
+# Marks an amount this screen SUGGESTED rather than one that was typed.
+# Only a suggestion may be overwritten by another suggestion, which is
+# what keeps the feature from ever fighting the person entering.
+SUGGESTED = int(QtCore.Qt.ItemDataRole.UserRole) + 3
+
 
 class _Cell(QtWidgets.QTableWidgetItem):
     """A cell that sorts on a KEY rather than on what it says.
@@ -454,6 +459,16 @@ class Report:
     period: str                       # "as at 31/03/2027", "01/04 to 31/03"
     sections: list[ReportSection]
     notes: list[str] = field(default_factory=list)
+    # A TWO-SIDED statement: the sections are taken in pairs and written left
+    # and right on ONE sheet, which is how a balance sheet is read. Without
+    # this each side became a sheet of its own and the reader had to hold one
+    # in their head while looking at the other.
+    side_by_side: bool = False
+    # Each section's own total, by heading. Needed because the Amount column
+    # cannot always simply be summed: the detailed balance sheet carries a
+    # heading's total AND the accounts beneath it, so a SUM() doubles the side.
+    totals: dict[str, float] = field(default_factory=dict)
+
 
     def filename(self, suffix: str) -> str:
         stem = re.sub(r"[^a-z0-9]+", "-", self.title.lower()).strip("-")
@@ -670,6 +685,9 @@ def _export_csv(report: Report, target: Path) -> None:
     with open(target, "w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle)
         writer.writerows(lines)
+        if report.side_by_side:
+            _csv_sides(writer, report)
+            return
         for section in report.sections:
             if section.heading:
                 writer.writerow([section.heading])
@@ -685,6 +703,155 @@ def _export_csv(report: Report, target: Path) -> None:
                 writer.writerow([note])
 
 
+# Column widths for the two-sided sheet: a ledger name, a figure, a gutter.
+_SIDE_WIDTHS = {"A": 38, "B": 16, "C": 3, "D": 38, "E": 16}
+
+
+def _cell_text(value) -> str:
+    return "" if pd.isna(value) else str(value)
+
+
+def _export_excel_sides(report: Report, target: Path) -> None:
+    """A two-sided statement on ONE sheet, laid out the way it is read.
+
+    Asked for 2026-10-20: "balancesheet export format need to be more
+    profession not in 2 seperate sheets, it should be in one sheet". So the
+    sections are taken in pairs, left beside right, under one title block,
+    each side ruled off and totalled.
+
+    Figures stay NUMBERS with a format applied, never formatted text - a
+    column of "1,234.00" strings is a spreadsheet you repair before you can
+    use it, and that principle does not change because the layout got
+    smarter.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = (re.sub(r"[\[\]:*?/\\]", " ", report.title)[:31].strip()
+                   or "Report")
+
+    rule = Side(style="thin", color="FF999999")
+    heavy = Side(style="medium", color="FF333333")
+    band = PatternFill("solid", fgColor="FFF2F2F2")
+    money = "#,##0.00"
+    right = Alignment(horizontal="right")
+
+    for column, width in _SIDE_WIDTHS.items():
+        sheet.column_dimensions[column].width = width
+
+    # --- who, what, when, centred over the whole statement ---
+    for row, (text, font) in enumerate((
+            (db.company_display_name(), Font(bold=True, size=14)),
+            (report.title, Font(bold=True, size=12)),
+            (report.period, Font(italic=True, color="FF666666"))), start=1):
+        sheet.merge_cells(start_row=row, start_column=1,
+                          end_row=row, end_column=5)
+        cell = sheet.cell(row=row, column=1, value=text)
+        cell.font = font
+        cell.alignment = Alignment(horizontal="center")
+
+    at = 5
+    for first in range(0, len(report.sections), 2):
+        pair = report.sections[first:first + 2]
+        left = pair[0]
+        other = pair[1] if len(pair) > 1 else None
+
+        for column, section in ((1, left), (4, other)):
+            if section is None:
+                continue
+            head = sheet.cell(row=at, column=column,
+                              value=section.heading or "Particulars")
+            amount = sheet.cell(row=at, column=column + 1, value="Amount")
+            for cell in (head, amount):
+                cell.font = Font(bold=True)
+                cell.fill = band
+                cell.border = Border(bottom=heavy)
+            amount.alignment = right
+
+        rows = max(len(left.frame),
+                   0 if other is None else len(other.frame))
+        for offset in range(rows):
+            for column, section in ((1, left), (4, other)):
+                if section is None or offset >= len(section.frame):
+                    continue
+                particular = _cell_text(section.frame.iloc[offset, 0])
+                value = section.frame.iloc[offset, 1]
+                # The detailed balance sheet indents its accounts with spaces.
+                # Excel has a real indent, which survives a column resize and
+                # does not read as a typo.
+                deep = particular.startswith(acc.DETAIL_INDENT)
+                name = sheet.cell(row=at + 1 + offset, column=column,
+                                  value=particular.strip())
+                if deep:
+                    name.alignment = Alignment(indent=2)
+                else:
+                    name.font = Font(bold=True) if rows and any(
+                        _cell_text(v).startswith(acc.DETAIL_INDENT)
+                        for v in section.frame.iloc[:, 0]) else Font()
+                figure = sheet.cell(row=at + 1 + offset, column=column + 1,
+                                    value=None if pd.isna(value) else float(value))
+                figure.number_format = money
+
+        total_row = at + 1 + rows
+        for column, section in ((1, left), (4, other)):
+            if section is None:
+                continue
+            label = sheet.cell(row=total_row, column=column, value="Total")
+            figure = sheet.cell(row=total_row, column=column + 1,
+                                value=report.totals.get(section.heading))
+            for cell in (label, figure):
+                cell.font = Font(bold=True)
+                cell.border = Border(top=rule, bottom=heavy)
+            figure.number_format = money
+        at = total_row + 2
+
+    for note in report.notes:
+        if not note:
+            continue
+        sheet.merge_cells(start_row=at, start_column=1,
+                          end_row=at, end_column=5)
+        cell = sheet.cell(row=at, column=1, value=note)
+        cell.font = Font(italic=True, size=9, color="FF666666")
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        at += 1
+
+    sheet.sheet_view.showGridLines = False
+    book.save(target)
+
+
+def _csv_sides(writer, report: Report) -> None:
+    """The two-sided layout again, so both exports read as one statement."""
+    for first in range(0, len(report.sections), 2):
+        pair = report.sections[first:first + 2]
+        left = pair[0]
+        other = pair[1] if len(pair) > 1 else None
+        writer.writerow([left.heading or "Particulars", "Amount", "",
+                         (other.heading if other else ""),
+                         ("Amount" if other else "")])
+        rows = max(len(left.frame), 0 if other is None else len(other.frame))
+        for offset in range(rows):
+            row = []
+            for section in (left, other):
+                if section is None or offset >= len(section.frame):
+                    row += ["", ""]
+                else:
+                    value = section.frame.iloc[offset, 1]
+                    row += [_cell_text(section.frame.iloc[offset, 0]),
+                            "" if pd.isna(value) else value]
+                if section is left:
+                    row.append("")
+            writer.writerow(row)
+        writer.writerow(["Total", report.totals.get(left.heading), "",
+                         "Total" if other else "",
+                         report.totals.get(other.heading) if other else ""])
+        writer.writerow([])
+    for note in report.notes:
+        if note:
+            writer.writerow([note])
+
+
 def _export_excel(report: Report, target: Path) -> None:
     """A sheet per section, each headed with who, what and when.
 
@@ -692,6 +859,9 @@ def _export_excel(report: Report, target: Path) -> None:
     characters it refuses, because a long section heading would otherwise make
     the whole write fail at the last step.
     """
+    if report.side_by_side:
+        _export_excel_sides(report, target)
+        return
     with pd.ExcelWriter(target, engine="openpyxl") as writer:
         for index, section in enumerate(report.sections):
             name = re.sub(r"[\[\]:*?/\\]", " ",
@@ -1278,12 +1448,20 @@ class VoucherScreen(QtWidgets.QWidget):
     """The screen you live in: type, date, number, then a Dr/Cr grid."""
 
     posted = QtCore.Signal()
+    # Raised only when an EXISTING voucher was saved, so the window can go
+    # back to the report it was opened from. A new voucher deliberately
+    # does not: there you are entering a run of them.
+    altered = QtCore.Signal()
     masters_changed = QtCore.Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.editing_id: int | None = None
         self.editing_voided = False
+        # Set before the grid exists, because writing a suggestion into it
+        # raises itemChanged, which lands straight back in _amount_typed.
+        self._loading = False
+        self._suggesting = False
         # The GST facts of the voucher being entered: what the lines cannot
         # say. None until Alt+T has been through.
         self._gst: dict | None = None
@@ -1332,6 +1510,7 @@ class VoucherScreen(QtWidgets.QWidget):
             0, QtWidgets.QHeaderView.Stretch)
         self.grid.verticalHeader().setVisible(False)
         self.grid.itemChanged.connect(self._recalculate)
+        self.grid.itemChanged.connect(self._amount_typed)
         # Moving between rows changes whether the Bills button means anything,
         # and nothing else would notice: the cells themselves have not changed.
         self.grid.currentCellChanged.connect(
@@ -1565,6 +1744,90 @@ class VoucherScreen(QtWidgets.QWidget):
         combo = self.grid.cellWidget(last, 0)
         if combo and combo.currentText().strip() and self.grid.rowCount() < 30:
             self._add_row()
+
+    def _amount_typed(self, item) -> None:
+        """Offer the balancing amount on the next line.
+
+        Asked for 2026-10-20: "as soon as i enter the amount in first line as
+        Debit/Credit it should be copied in next line unless i change it to
+        make it a multiline journal". So the line below is offered whatever
+        would make the voucher balance - for the ordinary two-line voucher
+        that is the amount just typed, on the other side; for a journal being
+        built up it is the REMAINDER, so changing the suggestion to 400 of
+        1,000 leaves 600 offered on the line after.
+
+        It never argues. A cell is only ever written if it is empty or holds
+        an earlier suggestion of ours; anything typed by hand is left alone.
+        """
+        if self._loading or self._suggesting or item is None:
+            return
+        if item.column() not in (1, 2):
+            return
+        # Typed over: this figure is the user's now, not a suggestion.
+        # Guarded, because setData raises itemChanged in its own right - and
+        # unguarded this method re-entered, the inner pass wrote the
+        # remainder, and the outer pass then saw a balanced voucher and
+        # withdrew the suggestion it had just made.
+        self._suggesting = True
+        try:
+            item.setData(SUGGESTED, None)
+        finally:
+            self._suggesting = False
+        self._suggest_balance(item.row() + 1)
+
+    def _suggest_balance(self, row: int) -> None:
+        if row < 0 or row >= 30:
+            return
+        # Read from the CELLS, not from row_values(), which skips a line
+        # whose ledger is not chosen yet. The amount is often typed before
+        # the ledger, and a suggestion that appeared only sometimes would be
+        # harder to trust than one that always does.
+        gap = 0.0
+        for index in range(self.grid.rowCount()):
+            debit = self.grid.item(index, 1)
+            credit = self.grid.item(index, 2)
+            gap += parse_amount(debit.text() if debit else "")
+            gap -= parse_amount(credit.text() if credit else "")
+        gap = round(gap, 2)
+
+        self._suggesting = True
+        try:
+            # The spare line below is added when a LEDGER is filled in, not an
+            # amount, so on a two-line voucher there is nowhere to put the
+            # remainder yet. A gap means another line is needed regardless, so
+            # it is added - but only then, never on a voucher that balances.
+            if row >= self.grid.rowCount():
+                if abs(gap) <= 0.005:
+                    return
+                self._add_row()
+            self._write_suggestion(row, gap)
+        finally:
+            self._suggesting = False
+        self._recalculate()
+
+    def _write_suggestion(self, row: int, gap: float) -> None:
+        cells = [self.grid.item(row, 1), self.grid.item(row, 2)]
+        if any(cell is None for cell in cells):
+            return
+        # Both of the line's amount cells have to be ours to write into, or a
+        # figure someone entered would be moved or erased.
+        if any(cell.text().strip() and cell.data(SUGGESTED) is None
+               for cell in cells):
+            return
+
+        wanted = ["", ""]
+        if gap > 0.005:                       # debits lead: offer a credit
+            wanted[1] = f"{gap:,.2f}"
+        elif gap < -0.005:
+            wanted[0] = f"{-gap:,.2f}"
+        # gap of nil leaves both blank, clearing a suggestion that has been
+        # made good some other way - a stale one would be read as a figure.
+
+        for cell, text in zip(cells, wanted):
+            if cell.text() == text:
+                continue
+            cell.setText(text)
+            cell.setData(SUGGESTED, True if text else None)
 
     def _type_changed(self, name: str) -> None:
         if self.editing_id is None:
@@ -2091,6 +2354,8 @@ class VoucherScreen(QtWidgets.QWidget):
         was_editing = self.editing_id is not None
         self.reset()
         self.posted.emit()
+        if was_editing:
+            self.altered.emit()
         window = self.window()
         if isinstance(window, QtWidgets.QMainWindow):
             window.statusBar().showMessage(
@@ -2791,6 +3056,7 @@ class BalanceSheetScreen(QtWidgets.QWidget):
         layout.addWidget(ReportActions(self.report))
         self._note = note.text()
         self._sides: dict[str, pd.DataFrame] = {}
+        self._totals: dict[str, float] = {}
         self._lines: list[str] = []
 
     def report(self) -> Report:
@@ -2806,7 +3072,12 @@ class BalanceSheetScreen(QtWidgets.QWidget):
                               ("Amount",)),
                 ReportSection("Assets", self._sides.get("assets", blank),
                               ("Amount",))],
-            notes=self._lines + [self._note])
+            notes=self._lines + [self._note],
+            # Read left and right on one sheet, and told its own totals -
+            # the detailed form's Amount column cannot be summed.
+            side_by_side=True,
+            totals={"Liabilities": self._totals.get("liabilities", 0.0),
+                    "Assets": self._totals.get("assets", 0.0)})
 
     def refresh(self) -> None:
         _, as_at = self.period.range()
@@ -2822,6 +3093,7 @@ class BalanceSheetScreen(QtWidgets.QWidget):
                          sortable=not detailed)
         self._sides = {"liabilities": sheet["liabilities"],
                        "assets": sheet["assets"]}
+        self._totals = dict(totals)
         self._lines = [
             f"Liabilities {money(totals['liabilities'])}"
             f"  ·  Assets {money(totals['assets'])}"]
@@ -3227,10 +3499,21 @@ class MastersScreen(QtWidgets.QWidget):
         ledger_layout.addLayout(form)
 
         buttons = QtWidgets.QHBoxLayout()
-        create = QtWidgets.QPushButton("Create ledger")
-        create.clicked.connect(self.create_ledger)
+        # The form above does double duty: it creates, and when a ledger is
+        # picked for editing it fills with that ledger and this button saves
+        # it instead. Same shape as altering a voucher.
+        self.led_save = QtWidgets.QPushButton("Create ledger")
+        self.led_save.clicked.connect(self.save_ledger)
+        create = self.led_save
+        self.led_edit = QtWidgets.QPushButton("Edit selected")
+        self.led_edit.clicked.connect(self.edit_ledger)
+        self.led_cancel = QtWidgets.QPushButton("Cancel edit")
+        self.led_cancel.clicked.connect(self.stop_editing_ledger)
+        self.led_cancel.setVisible(False)
         delete = QtWidgets.QPushButton("Delete selected")
         delete.clicked.connect(self.delete_ledger)
+        buttons.addWidget(self.led_edit)
+        buttons.addWidget(self.led_cancel)
         # The only way to change an EXISTING ledger from this screen. Without
         # it a rate could only ever be set on a brand new ledger, which is no
         # use to books that already have their customers in them.
@@ -3260,12 +3543,30 @@ class MastersScreen(QtWidgets.QWidget):
         group_form.addWidget(self.grp_name, 1)
         group_form.addWidget(QtWidgets.QLabel("Under"))
         group_form.addWidget(self.grp_parent, 1)
-        add_group = QtWidgets.QPushButton("Create group")
-        add_group.clicked.connect(self.create_group)
-        group_form.addWidget(add_group)
+        self.grp_save = QtWidgets.QPushButton("Create group")
+        self.grp_save.clicked.connect(self.save_group)
+        group_form.addWidget(self.grp_save)
+        self.grp_edit = QtWidgets.QPushButton("Edit selected")
+        self.grp_edit.clicked.connect(self.edit_group)
+        group_form.addWidget(self.grp_edit)
+        self.grp_cancel = QtWidgets.QPushButton("Cancel edit")
+        self.grp_cancel.clicked.connect(self.stop_editing_group)
+        self.grp_cancel.setVisible(False)
+        group_form.addWidget(self.grp_cancel)
         group_layout.addLayout(group_form)
         tabs.addTab(group_page, "Groups")
 
+        self.led_hint = muted(flowing(QtWidgets.QLabel()))
+        ledger_layout.addWidget(self.led_hint)
+        self.grp_hint = muted(flowing(QtWidgets.QLabel(
+            "A group's nature follows the group it sits under. The 27 "
+            "reserved groups cannot be renamed or moved - the reports are "
+            "built on them by name - so put a sub-group under one instead.")))
+        group_layout.addWidget(self.grp_hint)
+        # The master being edited, by name, or None while creating.
+        self._editing_ledger: str | None = None
+        self._editing_active = True
+        self._editing_group: str | None = None
         self.refresh()
 
     def refresh(self) -> None:
@@ -3291,7 +3592,8 @@ class MastersScreen(QtWidgets.QWidget):
             "Nature": groups["nature"],
             "Trading": groups["affects_gross"].map({1: "yes", 0: ""}),
             "Reserved": groups["is_reserved"].map({1: "yes", 0: ""}),
-        }))
+        }), keys=groups["name"])
+        self._group_names = list(groups["name"])
         names = list(groups["name"])
         for box in (self.led_group, self.grp_parent):
             current = box.currentText()
@@ -3316,21 +3618,88 @@ class MastersScreen(QtWidgets.QWidget):
             raise ValueError(f"{self.led_rate.text()!r} is not a GST rate. "
                              f"Leave it blank if the ledger is not taxable.")
 
-    def create_ledger(self) -> None:
-        try:
-            db.add_ledger(self.led_name.text(), self.led_group.currentText(),
-                          self.led_open.value(), self.led_side.currentText(),
-                          gst_rate=self._typed_rate(),
-                          gstin=self.led_gstin.text().strip().upper(),
-                          state_code=self.led_state.currentData() or "")
-        except ValueError as exc:
-            self._warn(exc)
+    def _selected(self, table, known) -> str | None:
+        """The name on the highlighted line, or None."""
+        row = table.currentRow()
+        name = table.key_at(row) if row >= 0 else None
+        return str(name) if name and name in known else None
+
+    def edit_ledger(self) -> None:
+        """Fill the form from the picked ledger, so the form saves it."""
+        name = self._selected(self.ledger_table, self._ledger_names)
+        if name is None:
+            self._warn(ValueError("Pick a ledger in the list first."))
             return
+        row = db.get_ledgers(include_inactive=True).set_index("name").loc[name]
+        self._editing_ledger = name
+        # Kept rather than defaulted: `update_ledger` takes active=True, so a
+        # ledger switched off in the browser version would be switched back on
+        # by saving it here, which nothing on this screen asked for.
+        self._editing_active = bool(row.get("active", 1))
+        self.led_name.setText(name)
+        self.led_group.setCurrentText(str(row["group_name"]))
+        self.led_open.setValue(float(row["opening"]))
+        self.led_side.setCurrentText(str(row["opening_side"]))
+        # The GST boxes are filled too, so what the form shows is what saving
+        # it will write - including a rate taken back off.
+        rate = row.get("gst_rate")
+        self.led_rate.setText("" if rate is None or pd.isna(rate)
+                              else f"{float(rate):g}")
+        self.led_gstin.setText(str(row.get("gstin") or ""))
+        code = str(row.get("state_code") or "")
+        self.led_state.setCurrentIndex(
+            max(0, self.led_state.findData(code)) if code else 0)
+        self._ledger_mode()
+        self.led_name.setFocus()
+
+    def stop_editing_ledger(self) -> None:
+        self._editing_ledger = None
+        self._editing_active = True
         self.led_name.clear()
         self.led_open.setValue(0)
         self.led_rate.clear()
         self.led_gstin.clear()
         self.led_state.setCurrentIndex(0)
+        self._ledger_mode()
+
+    def _ledger_mode(self) -> None:
+        editing = self._editing_ledger is not None
+        self.led_save.setText("Save changes" if editing else "Create ledger")
+        self.led_cancel.setVisible(editing)
+        self.led_edit.setEnabled(not editing)
+        self.led_hint.setText(
+            f"Editing {self._editing_ledger} — its vouchers and bills are "
+            f"untouched, they follow the ledger." if editing else "")
+
+    def save_ledger(self) -> None:
+        """Create, or save the ledger being edited - whichever the form is."""
+        try:
+            if self._editing_ledger is None:
+                db.add_ledger(self.led_name.text(),
+                              self.led_group.currentText(),
+                              self.led_open.value(),
+                              self.led_side.currentText(),
+                              gst_rate=self._typed_rate(),
+                              gstin=self.led_gstin.text().strip().upper(),
+                              state_code=self.led_state.currentData() or "")
+            else:
+                ledger = db.ledger_id(self._editing_ledger)
+                db.update_ledger(ledger, self.led_name.text(),
+                                 self.led_group.currentText(),
+                                 self.led_open.value(),
+                                 self.led_side.currentText(),
+                                 active=self._editing_active)
+                # Through set_ledger_gst, not update_ledger: there None means
+                # "leave it alone", and clearing the rate box has to be able
+                # to mean "not taxable".
+                db.set_ledger_gst(
+                    ledger, rate=self._typed_rate(),
+                    gstin=self.led_gstin.text().strip().upper(),
+                    state_code=self.led_state.currentData() or "")
+        except ValueError as exc:
+            self._warn(exc)
+            return
+        self.stop_editing_ledger()
         self.refresh()
         self.changed.emit()
 
@@ -3392,13 +3761,48 @@ class MastersScreen(QtWidgets.QWidget):
         self.refresh()
         self.changed.emit()
 
-    def create_group(self) -> None:
+    # --- groups ---------------------------------------------------------- #
+    def edit_group(self) -> None:
+        name = self._selected(self.group_table, self._group_names)
+        if name is None:
+            self._warn(ValueError("Pick a group in the list first."))
+            return
+        row = db.get_groups().set_index("name").loc[name]
+        if int(row["is_reserved"]):
+            self._warn(ValueError(
+                f"{name} is one of the reserved groups. The reports are built "
+                f"on these by name, so they cannot be renamed or moved - "
+                f"create a sub-group under it instead."))
+            return
+        self._editing_group = name
+        self.grp_name.setText(name)
+        parent = row.get("parent_name")
+        self.grp_parent.setCurrentText("" if pd.isna(parent) else str(parent))
+        self._group_mode()
+        self.grp_name.setFocus()
+
+    def stop_editing_group(self) -> None:
+        self._editing_group = None
+        self.grp_name.clear()
+        self._group_mode()
+
+    def _group_mode(self) -> None:
+        editing = self._editing_group is not None
+        self.grp_save.setText("Save changes" if editing else "Create group")
+        self.grp_cancel.setVisible(editing)
+        self.grp_edit.setEnabled(not editing)
+
+    def save_group(self) -> None:
         try:
-            db.add_group(self.grp_name.text(), self.grp_parent.currentText())
+            if self._editing_group is None:
+                db.add_group(self.grp_name.text(), self.grp_parent.currentText())
+            else:
+                db.update_group(self._editing_group, self.grp_name.text(),
+                                self.grp_parent.currentText())
         except ValueError as exc:
             self._warn(exc)
             return
-        self.grp_name.clear()
+        self.stop_editing_group()
         self.refresh()
         self.changed.emit()
 
@@ -3785,7 +4189,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for _, widget in self.screens:
             self.stack.addWidget(widget)
 
+        self._altered_from: int | None = None
         self.voucher.posted.connect(self.refresh_all)
+        self.voucher.altered.connect(self._back_from_alter)
         self.voucher.masters_changed.connect(self._masters_changed)
         self.masters.changed.connect(self.refresh_all)
         self.daybook.open_voucher.connect(self._alter)
@@ -4333,8 +4739,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.voucher.accept_voucher()
 
     def _alter(self, voucher_id: int) -> None:
+        # Remembered so that saving the alteration returns to the report it
+        # was opened from (user asked 2026-10-20): you were reading the Day
+        # Book and went to fix one line, not starting a new voucher.
+        self._altered_from = self.stack.currentIndex()
         self.voucher.load_voucher(int(voucher_id))
         self.show_screen(0)
+
+    def _back_from_alter(self) -> None:
+        """Go back to the report the altered voucher was opened from."""
+        index, self._altered_from = self._altered_from, None
+        if index is not None and index != 0:
+            self.show_screen(index)
 
     def show_screen(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
