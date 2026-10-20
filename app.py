@@ -74,6 +74,9 @@ if _kept:
 
 COMPANY = db.get_setting("company_name", "My Company")
 CURRENCY = db.get_setting("currency", "₹")
+# Read once per run, like the currency: dates are STORED as ISO and only
+# shown this way, and the Company tab is where the setting is changed.
+DATE_FMT = db.date_format()
 FY_START_MONTH = int(db.get_setting("fy_start_month", "4"))
 BOOKS_BEGIN = db.get_setting("books_begin", "")
 
@@ -153,8 +156,8 @@ def as_at_picker(key: str, label: str = "Financial year") -> date:
     if choice == "Custom date…":
         with right:
             return st.date_input("As at", value=date.today(),
-                                 format="DD/MM/YYYY", key=f"{key}_asat")
-    st.caption(f"As at {closes[choice].strftime('%d/%m/%Y')}")
+                                 format=DATE_FMT.streamlit, key=f"{key}_asat")
+    st.caption(f"As at {closes[choice].strftime(DATE_FMT.python)}")
     return closes[choice]
 
 
@@ -205,7 +208,7 @@ def period_picker(key: str, allow_all: bool = True) -> tuple[date | None, date]:
         with right:
             picked = st.date_input(
                 "From / to", value=(FY_START, date.today()),
-                format="DD/MM/YYYY", key=f"{key}_range")
+                format=DATE_FMT.streamlit, key=f"{key}_range")
         if isinstance(picked, tuple) and len(picked) == 2:
             return picked[0], picked[1]
         return FY_START, date.today()
@@ -252,7 +255,7 @@ def voucher_editor(prefix: str = "vch", existing: dict | None = None,
             "Date",
             value=(date.fromisoformat(existing["voucher_date"]) if existing
                    else date.today()),
-            format="DD/MM/YYYY", key=k("date"))
+            format=DATE_FMT.streamlit, key=k("date"))
         number = (int(existing["number"]) if existing
                   else db.next_voucher_number(voucher_type))
         st.caption(f"Voucher No. **{number}**")
@@ -395,8 +398,8 @@ def voucher_editor(prefix: str = "vch", existing: dict | None = None,
 # --------------------------------------------------------------------------- #
 st.title(f"📗 {COMPANY}")
 st.caption(
-    f"Financial year {FY_START.strftime('%d/%m/%Y')} to {FY_END.strftime('%d/%m/%Y')}"
-    + (f" · books began {date.fromisoformat(BOOKS_BEGIN).strftime('%d/%m/%Y')}"
+    f"Financial year {FY_START.strftime(DATE_FMT.python)} to {FY_END.strftime(DATE_FMT.python)}"
+    + (f" · books began {date.fromisoformat(BOOKS_BEGIN).strftime(DATE_FMT.python)}"
        if BOOKS_BEGIN else "")
 )
 show_flash()
@@ -449,7 +452,7 @@ with tab_daybook:
             height=table_height(len(book), 20),
             on_select="rerun", selection_mode="single-row",
             column_config={
-                "Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY"),
+                "Date": st.column_config.DateColumn("Date", format=DATE_FMT.streamlit),
                 "Particulars": st.column_config.TextColumn("Particulars",
                                                            width="large"),
                 "Debit": amount_col("Debit"), "Credit": amount_col("Credit"),
@@ -551,7 +554,7 @@ with tab_ledger:
                 entries.drop(columns=["voucher_id"]), hide_index=True,
                 width="stretch", height=table_height(len(entries), 20),
                 column_config={
-                    "Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY"),
+                    "Date": st.column_config.DateColumn("Date", format=DATE_FMT.streamlit),
                     "Particulars": st.column_config.TextColumn("Particulars",
                                                                width="large"),
                     "Debit": amount_col("Debit"), "Credit": amount_col("Credit"),
@@ -610,7 +613,7 @@ with tab_pl:
 
     st.caption(
         ("Since the books began" if pl_from is None
-         else f"{pl_from.strftime('%d/%m/%Y')} to {pl_to.strftime('%d/%m/%Y')}")
+         else f"{pl_from.strftime(DATE_FMT.python)} to {pl_to.strftime(DATE_FMT.python)}")
         + ". The trading accounts give gross profit; the indirect accounts "
           "take it to net profit."
     )
@@ -660,9 +663,9 @@ with tab_pl:
         data=sections_csv(
             "Profit & Loss",
             ("since the books began to "
-             f"{pl_to.strftime('%d/%m/%Y')}" if pl_from is None else
-             f"{pl_from.strftime('%d/%m/%Y')} to "
-             f"{pl_to.strftime('%d/%m/%Y')}"),
+             f"{pl_to.strftime(DATE_FMT.python)}" if pl_from is None else
+             f"{pl_from.strftime(DATE_FMT.python)} to "
+             f"{pl_to.strftime(DATE_FMT.python)}"),
             [("Trading account - purchases and direct expenses",
               report["trading_expense"]),
              ("Trading account - sales and direct incomes",
@@ -750,8 +753,10 @@ with tab_masters:
                 entered[field.key] = st.date_input(
                     field.label,
                     value=date.fromisoformat(current) if current else FY_START,
-                    format="DD/MM/YYYY").isoformat()
-            elif field.kind == "choice":
+                    format=DATE_FMT.streamlit).isoformat()
+            elif field.kind in ("choice", "option"):
+                # st.selectbox is closed either way, so the two kinds differ
+                # only in the Qt app, where `choice` takes a typed value.
                 choices = list(field.choices)
                 entered[field.key] = st.selectbox(
                     field.label, choices,

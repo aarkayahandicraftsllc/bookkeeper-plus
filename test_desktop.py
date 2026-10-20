@@ -1201,6 +1201,63 @@ check("and opens nothing", _launched, [])
 QtWidgets.QFileDialog.getSaveFileName = _real_dialog
 QtGui.QDesktopServices.openUrl = _real_open
 
+print("\n22b) The date format is a setting, and changes the display only")
+# The ask (2026-10-20) was "$ means MM/DD/YYYY, rupees mean DD/MM/YYYY, or
+# give me a line to pick it". It is a field, defaulted from the currency.
+window.show_screen(1)                              # Day Book
+settle()
+check("the Day Book has rows to read a date out of",
+      window.daybook.table.rowCount() > 0, True)
+iso = str(window.daybook._shown["Date"].iloc[0])
+when = date.fromisoformat(iso)
+
+
+def daybook_date() -> str:
+    return window.daybook.table.item(0, 0).text()
+
+
+# This column used to show the raw ISO date while the editors above it said
+# 01/04/2026 - the report tables ignored the convention entirely.
+check("the table shows a date, not the ISO the frame carries",
+      daybook_date(), when.strftime("%d/%m/%Y"))
+check("and the voucher editor takes one the same way",
+      window.voucher.date_edit.displayFormat(), "dd/MM/yyyy")
+
+company_index = [name for name, _ in window.screens].index("Company")
+window.show_screen(company_index)
+settle()
+co.editors["date_format"].setCurrentText("MM/DD/YYYY")
+check("saving the new format succeeds", co.save(), True)
+settle()
+# A QDateEdit's display format is set ONCE, when it is built, so every editor
+# on every other screen would otherwise go on showing the old order.
+check("the Day Book followed", daybook_date(), when.strftime("%m/%d/%Y"))
+check("and so did the voucher editor, on another screen",
+      window.voucher.date_edit.displayFormat(), "MM/dd/yyyy")
+check("and the period editors on the reports",
+      window.daybook.period.to_edit.displayFormat(), "MM/dd/yyyy")
+
+# Print follows the screen; the spreadsheet does NOT. It keeps the ISO date it
+# can sort and filter on - the same split the money columns already make.
+window.show_screen(1)
+settle()
+dated = window.current_report()
+page = desktop.report_html(dated)
+check("the printed page carries the chosen format",
+      when.strftime("%m/%d/%Y") in page, True)
+check("and not the ISO date", iso in page, False)
+desktop.export_report(dated, path=str(db.DATA_DIR / "dates.csv"))
+check("the CSV keeps ISO, so it still sorts",
+      iso in (db.DATA_DIR / "dates.csv").read_text(encoding="utf-8-sig"), True)
+
+window.show_screen(company_index)
+settle()
+co.editors["date_format"].setCurrentText("DD/MM/YYYY")
+check("and it goes back", co.save(), True)
+settle()
+check("the Day Book came back with it", daybook_date(),
+      when.strftime("%d/%m/%Y"))
+
 print("\n23) Voiding, restoring and deleting a voucher")
 db.use_company(TMP)
 voucher = window.voucher

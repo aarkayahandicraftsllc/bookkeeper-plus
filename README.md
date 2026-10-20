@@ -300,6 +300,29 @@ opened, and the original text kept under `address_legacy` in case the split
 read wrongly. **ZIP / PIN code** takes a six-digit Indian PIN or a five-digit
 ZIP (with or without the +4).
 
+### Date format
+
+**Date format** picks between `DD/MM/YYYY` and `MM/DD/YYYY`, and governs every
+date the app shows or takes: the voucher date, a bill's due date, the From/To
+editors on the reports, the Date and Due columns on the Outstanding report,
+the period on a printed page.
+
+A set of books with no format chosen takes its first one **from the currency**
+— `$` starts on `MM/DD/YYYY`, anything else on `DD/MM/YYYY`. That is only the
+default. The two are separate settings once chosen, deliberately: changing the
+currency must not silently reorder dates that are already on screen, and there
+is no reading of a figure that makes `03/04` safe to reinterpret.
+
+**Dates are stored as ISO (`YYYY-MM-DD`) regardless** — in every table, in
+every setting, and in the frames the reports are built from. Only two places
+format them: the table on screen, and the printed page. **A spreadsheet export
+keeps the ISO date**, so it still sorts and filters on arrival — the same split
+the money columns make, and for the same reason. This matters more here than
+in Bookkeeper: ageing is arithmetic on those dates.
+
+`db.date_format()` and `db.show_date()` are the only two functions that know
+any of this; nothing else may hardcode a format.
+
 **Blank is always allowed** except the name — these are details you fill in as
 you learn them, and refusing to save a half-known address would be worse than
 useless. But a registration that *is* filled in has to be well formed, because

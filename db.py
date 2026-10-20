@@ -266,7 +266,11 @@ DEFAULT_SETTINGS = {
 class CompanyField:
     key: str
     label: str
-    kind: str = "text"          # text | multiline | month | date | choice
+    # choice offers values but takes an unlisted one (a currency symbol this
+    # build has never heard of); option is closed, because a date format the
+    # code does not know how to render is not a value at all.
+    kind: str = "text"          # text | multiline | month | date | choice |
+                                # option
     hint: str = ""
     choices: tuple[str, ...] = ()
     required: bool = False
@@ -278,6 +282,39 @@ class CompanyField:
 
 
 CURRENCY_SYMBOLS = ("₹", "$", "€", "£", "¥")
+
+
+# Dates are STORED as ISO (YYYY-MM-DD) in every table and every setting,
+# always. This is only how they are SHOWN on screen and typed into an editor.
+# Storing a localised date would make 03/04 ambiguous in the file itself and
+# would sort wrongly, which is also why the report frames keep ISO and only
+# the display boundary formats them.
+@dataclass(frozen=True)
+class DateFormat:
+    key: str            # what is stored, and what the dropdown offers
+    python: str         # strftime, for captions and table cells
+    qt: str             # QDateEdit.setDisplayFormat
+    streamlit: str      # st.date_input and DateColumn
+
+
+DATE_FORMATS: tuple[DateFormat, ...] = (
+    DateFormat("DD/MM/YYYY", "%d/%m/%Y", "dd/MM/yyyy", "DD/MM/YYYY"),
+    DateFormat("MM/DD/YYYY", "%m/%d/%Y", "MM/dd/yyyy", "MM/DD/YYYY"),
+)
+DEFAULT_DATE_FORMAT = "DD/MM/YYYY"
+
+# Which format a set of books STARTS on when nobody has chosen one. The
+# currency is the only clue the books carry about where they are kept, and it
+# is the clue the user pointed at - "if the currency sign is $ the date format
+# should be MM/DD/YYYY". It is a DEFAULT, not a rule: once the format has been
+# chosen the two settings are independent, so changing the currency later
+# cannot silently reorder every date on screen.
+DATE_FORMAT_BY_CURRENCY = {"$": "MM/DD/YYYY"}
+
+
+def default_date_format(currency: str) -> str:
+    return DATE_FORMAT_BY_CURRENCY.get((currency or "").strip(),
+                                       DEFAULT_DATE_FORMAT)
 
 COMPANY_FIELDS: tuple[CompanyField, ...] = (
     CompanyField("company_name", "Company name", required=True),
@@ -304,6 +341,11 @@ COMPANY_FIELDS: tuple[CompanyField, ...] = (
     CompanyField("books_begin", "Books begin on", kind="date"),
     CompanyField("currency", "Currency symbol", kind="choice",
                  choices=CURRENCY_SYMBOLS),
+    CompanyField("date_format", "Date format", kind="option",
+                 choices=tuple(fmt.key for fmt in DATE_FORMATS),
+                 hint="How dates are shown and typed. A new set of books "
+                      "takes its first format from the currency - $ starts "
+                      "on MM/DD/YYYY - and is its own setting after that."),
 )
 
 # Identifiers are stored upper case, because that is how they are issued and
@@ -331,9 +373,47 @@ def get_company() -> dict[str, str]:
     with connect() as conn:
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
     stored = {row["key"]: row["value"] for row in rows}
-    return {field.key: str(stored.get(field.key,
-                                      DEFAULT_SETTINGS.get(field.key, "")) or "")
-            for field in COMPANY_FIELDS}
+    values = {field.key: str(stored.get(field.key,
+                                        DEFAULT_SETTINGS.get(field.key, "")) or "")
+              for field in COMPANY_FIELDS}
+    # Not in DEFAULT_SETTINGS because the default depends on another field.
+    # Books that predate the setting - and every book does - come out on the
+    # format their currency implies, which is the whole point of deriving it.
+    if values["date_format"] not in {fmt.key for fmt in DATE_FORMATS}:
+        values["date_format"] = default_date_format(values["currency"])
+    return values
+
+
+def date_format() -> DateFormat:
+    """How these books show and take dates. Read at every display boundary."""
+    by_key = {fmt.key: fmt for fmt in DATE_FORMATS}
+    return by_key.get(get_company()["date_format"],
+                      by_key[DEFAULT_DATE_FORMAT])
+
+
+def show_date(value, fmt: DateFormat | None = None) -> str:
+    """An ISO date - string or ``date`` - written the way these books show it.
+
+    Anything that is not a date is passed through exactly as written, the same
+    way the amount formatter passes presentation text through: a report column
+    can carry a blank or a label, and a formatter that raised on those would
+    take the whole report down with it.
+
+    ``fmt`` is passed in by callers formatting a whole column, so a table of
+    200 rows asks the database once rather than 200 times.
+    """
+    if value is None or value == "":
+        return ""
+    if value != value:          # NaN and pandas' NaT, without importing pandas
+        return ""
+    if isinstance(value, str):
+        try:
+            value = date.fromisoformat(value[:10])
+        except ValueError:
+            return value
+    if not hasattr(value, "strftime"):
+        return str(value)
+    return value.strftime((fmt or date_format()).python)
 
 
 def validate_company(values: dict[str, str]) -> dict[str, str]:
@@ -403,6 +483,17 @@ def validate_company(values: dict[str, str]) -> dict[str, str]:
 
     if not cleaned["currency"]:
         cleaned["currency"] = DEFAULT_SETTINGS["currency"]
+
+    # Derived from the currency ONLY when nothing has been chosen - which is
+    # how a set of books gets its first one. After the currency default above,
+    # so that a blank currency still decides a format.
+    if not cleaned["date_format"]:
+        cleaned["date_format"] = default_date_format(cleaned["currency"])
+    elif cleaned["date_format"] not in {fmt.key for fmt in DATE_FORMATS}:
+        raise ValueError(
+            f"{cleaned['date_format']!r} is not a date format this build can "
+            f"show. Pick one of: "
+            f"{', '.join(fmt.key for fmt in DATE_FORMATS)}.")
     return cleaned
 
 

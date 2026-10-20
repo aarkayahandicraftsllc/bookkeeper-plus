@@ -1299,5 +1299,82 @@ check("a voucher stripped of its tax lines leaves the GST return",
 check("rather than sitting on it with no tax",
       local in set(acc.gst_register(outward=True)["voucher_id"]), False)
 
+print("\n24) How dates are shown, and what is stored underneath")
+# The ask (2026-10-20): "if the currency sign is $ the date format should be
+# MM/DD/YYYY and if its Rupees ... DD/MM/YYYY or provide a seperate line for
+# selecting date format". Built as a SETTING whose first value comes from the
+# currency - so both halves hold, without the two being chained forever.
+db.save_company(dict(GOOD, currency="₹", date_format=""))
+check("rupee books start on DD/MM/YYYY",
+      db.date_format().key, "DD/MM/YYYY")
+db.save_company(dict(GOOD, currency="$", date_format=""))
+check("dollar books start on MM/DD/YYYY",
+      db.date_format().key, "MM/DD/YYYY")
+check("and the derived value is SAVED, not re-derived every read",
+      db.get_setting("date_format"), "MM/DD/YYYY")
+
+# The point of it being its own field: a chosen format is not overruled.
+db.save_company(dict(GOOD, currency="$", date_format="DD/MM/YYYY"))
+check("a chosen format outranks the currency",
+      db.date_format().key, "DD/MM/YYYY")
+db.save_company(dict(GOOD, currency="€", date_format="DD/MM/YYYY"))
+check("and changing the currency does not reorder the dates",
+      db.date_format().key, "DD/MM/YYYY")
+
+try:
+    db.validate_company(dict(GOOD, date_format="YY.MM.DD"))
+    check("a format the app cannot render is refused", "accepted", "rejected")
+except ValueError as exc:
+    check("a format the app cannot render is refused", "rejected", "rejected")
+    check("and it lists the ones that work", "MM/DD/YYYY" in str(exc), True)
+
+for name, fmt in (("DD/MM/YYYY", "DD/MM/YYYY"), ("MM/DD/YYYY", "MM/DD/YYYY")):
+    db.save_company(dict(GOOD, date_format=fmt))
+    check(f"an ISO string shown as {name}",
+          db.show_date("2026-03-04"), "04/03/2026" if fmt[0] == "D"
+          else "03/04/2026")
+    check(f"a date object shown as {name}",
+          db.show_date(date(2026, 3, 4)), "04/03/2026" if fmt[0] == "D"
+          else "03/04/2026")
+check("a blank is blank, not a crash", db.show_date(""), "")
+check("and so is a missing value", db.show_date(None), "")
+check("something that is not a date is passed through as written",
+      db.show_date("Opening Balance"), "Opening Balance")
+
+# THE INVARIANT: only the display changes. Nothing localised is ever stored,
+# or the file would be ambiguous and the Date column would sort wrongly - and
+# here the bills' own dates ride on the same rule.
+db.save_company(dict(GOOD, date_format="MM/DD/YYYY"))
+vid = post("Journal", 7, "stored ISO", ("Rent", 10, 0), ("Cash", 0, 10))
+check("the voucher date is stored ISO whatever is displayed",
+      db.get_voucher(vid)[0]["voucher_date"], "2026-04-07")
+check("so the report frame carries ISO too",
+      str(acc.day_book(date(2026, 4, 7), date(2026, 4, 7))["Date"].iloc[0]),
+      "2026-04-07")
+
+
+def _iso_or_blank(value) -> bool:
+    """A cell that is an ISO date, or empty - a bill may have no due date."""
+    text = str(value or "")
+    if not text:
+        return True
+    try:
+        date.fromisoformat(text)
+        return True
+    except ValueError:
+        return False
+
+
+# Both of the Outstanding report's date columns ride on the same rule, and
+# `Due` is the one that would be missed: it is only a date on some rows.
+_bills = acc.outstanding()["bills"]
+check("the Outstanding report has its two date columns",
+      [column for column in ("Date", "Due") if column in _bills.columns],
+      ["Date", "Due"])
+check("and carries ISO in both of them",
+      [column for column in ("Date", "Due") if column in _bills.columns
+       and not all(_iso_or_blank(v) for v in _bills[column])], [])
+db.save_company(dict(GOOD, date_format="DD/MM/YYYY"))
+
 print("\n" + ("ALL CHECKS PASSED" if not FAILURES else f"FAILURES: {FAILURES}"))
 raise SystemExit(1 if FAILURES else 0)
