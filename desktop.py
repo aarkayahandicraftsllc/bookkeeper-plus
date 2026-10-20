@@ -1462,6 +1462,12 @@ class VoucherScreen(QtWidgets.QWidget):
         # raises itemChanged, which lands straight back in _amount_typed.
         self._loading = False
         self._suggesting = False
+        # Balances as at the voucher date, WITHOUT this voucher. Cached
+        # because the grid recalculates on every keystroke and this reads
+        # every line in the books; invalidated whenever the date, the books
+        # or the voucher being edited change.
+        self._base: dict[str, float] = {}
+        self._base_key: tuple | None = None
         # The GST facts of the voucher being entered: what the lines cannot
         # say. None until Alt+T has been through.
         self._gst: dict | None = None
@@ -1479,6 +1485,10 @@ class VoucherScreen(QtWidgets.QWidget):
         head.addWidget(self.type_box)
 
         self.date_edit = QtWidgets.QDateEdit(to_qdate(date.today()))
+        # The balance shown is the balance AS AT this date, so moving the date
+        # has to throw the cached figures away and ask again.
+        self.date_edit.dateChanged.connect(
+            lambda *_: (self._forget_balances(), self._recalculate()))
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDisplayFormat(db.date_format().qt)
         head.addWidget(QtWidgets.QLabel("Date"))
@@ -1504,8 +1514,12 @@ class VoucherScreen(QtWidgets.QWidget):
         layout.addLayout(narration_row)
 
         # --- grid ---
-        self.grid = QtWidgets.QTableWidget(0, 3)
-        self.grid.setHorizontalHeaderLabels(["Particulars", "Debit", "Credit"])
+        # A fourth column: what the ledger on this line stands at once this
+        # voucher is in (user asked 2026-10-20). Read-only, and it follows the
+        # amounts as they are typed.
+        self.grid = QtWidgets.QTableWidget(0, 4)
+        self.grid.setHorizontalHeaderLabels(
+            ["Particulars", "Debit", "Credit", "Balance"])
         self.grid.horizontalHeader().setSectionResizeMode(
             0, QtWidgets.QHeaderView.Stretch)
         self.grid.verticalHeader().setVisible(False)
@@ -1655,6 +1669,12 @@ class VoucherScreen(QtWidgets.QWidget):
             item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
             item.setFont(mono_font())
             self.grid.setItem(row, col, item)
+        # The balance is told to you, not typed, so the cell cannot be edited.
+        shown = QtWidgets.QTableWidgetItem("")
+        shown.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        shown.setFont(mono_font())
+        shown.setFlags(shown.flags() & ~QtCore.Qt.ItemIsEditable)
+        self.grid.setItem(row, 3, shown)
         self._recalculate()
 
     def _remove_row(self) -> None:
@@ -1745,6 +1765,69 @@ class VoucherScreen(QtWidgets.QWidget):
         if combo and combo.currentText().strip() and self.grid.rowCount() < 30:
             self._add_row()
 
+        # Signals blocked: the Balance cells are not input, and letting them
+        # raise itemChanged would put _recalculate straight back into itself.
+        self.grid.blockSignals(True)
+        try:
+            self._show_balances()
+        finally:
+            self.grid.blockSignals(False)
+
+    def _base_balances(self) -> dict[str, float]:
+        """Each ledger's balance as at the voucher date, WITHOUT this voucher.
+
+        Without this voucher, because the line being typed is added on top: on
+        an alteration the saved copy is already in the books, so counting both
+        would show double the figure. A voided voucher is already left out of
+        the books, so there is nothing of it to take away.
+        """
+        as_at = from_qdate(self.date_edit.date())
+        key = (as_at, self.editing_id, self.editing_voided)
+        if key == self._base_key:
+            return self._base
+        frame = acc.balances(as_at)
+        base = {str(r.ledger): float(r.closing) for r in frame.itertuples()}
+        if self.editing_id is not None and not self.editing_voided:
+            record = db.get_voucher(int(self.editing_id))
+            if record:
+                head, lines = record
+                # Only if it is dated on or before the date being shown; a
+                # voucher moved to a later date never reached this balance.
+                if str(head["voucher_date"]) <= as_at.isoformat():
+                    for line in lines:
+                        name = str(line["ledger_name"])
+                        base[name] = round(
+                            base.get(name, 0.0)
+                            - float(line["debit"]) + float(line["credit"]), 2)
+        self._base, self._base_key = base, key
+        return base
+
+    def _forget_balances(self) -> None:
+        self._base_key = None
+
+    def _show_balances(self) -> None:
+        """Put each line's resulting balance in the Balance column."""
+        base = self._base_balances()
+        running = dict(base)
+        # Accumulated down the grid, so two lines on the same ledger show the
+        # balance after each of them rather than the same figure twice.
+        for row in range(self.grid.rowCount()):
+            combo = self.grid.cellWidget(row, 0)
+            cell = self.grid.item(row, 3)
+            if cell is None:
+                continue
+            name = combo.currentText().strip() if combo else ""
+            if not name or name not in self._ledger_ids:
+                cell.setText("")
+                continue
+            debit = self.grid.item(row, 1)
+            credit = self.grid.item(row, 2)
+            running[name] = round(
+                running.get(name, 0.0)
+                + parse_amount(debit.text() if debit else "")
+                - parse_amount(credit.text() if credit else ""), 2)
+            cell.setText(acc.fmt_side(running[name]))
+
     def _amount_typed(self, item) -> None:
         """Offer the balancing amount on the next line.
 
@@ -1768,12 +1851,23 @@ class VoucherScreen(QtWidgets.QWidget):
         # unguarded this method re-entered, the inner pass wrote the
         # remainder, and the outer pass then saw a balanced voucher and
         # withdrew the suggestion it had just made.
+        other = self.grid.item(item.row(), 2 if item.column() == 1 else 1)
         self._suggesting = True
         try:
             item.setData(SUGGESTED, None)
+            # A line is one side or the other, never both - the screen says so
+            # under the grid - so a SUGGESTION on the other side of this same
+            # line cannot stand once an amount is typed here. Left in place it
+            # made a line of Dr 100 and Cr 100, which nets to nothing and
+            # which the data layer would refuse on Accept.
+            if (item.text().strip() and other is not None
+                    and other.data(SUGGESTED) is not None):
+                other.setText("")
+                other.setData(SUGGESTED, None)
         finally:
             self._suggesting = False
         self._suggest_balance(item.row() + 1)
+
 
     def _suggest_balance(self, row: int) -> None:
         if row < 0 or row >= 30:
@@ -1889,6 +1983,7 @@ class VoucherScreen(QtWidgets.QWidget):
         self._loading = False
 
     def reload_ledgers(self) -> None:
+        self._forget_balances()          # the books may have moved under us
         self._ledgers = db.get_ledgers()
         self._ledger_names = list(self._ledgers["name"])
         self._ledger_ids = dict(zip(self._ledgers["name"],
@@ -1896,6 +1991,7 @@ class VoucherScreen(QtWidgets.QWidget):
 
     def reset(self) -> None:
         self._loading = True
+        self._forget_balances()
         self.reload_ledgers()
         self.editing_id = None
         self.editing_voided = False

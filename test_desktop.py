@@ -1793,6 +1793,82 @@ check("a new voucher leaves you on voucher entry",
       window.stack.currentIndex(), 0)
 
 
+print("\n23g) The balance of the account picked, as at the voucher date")
+db.use_company(TMP)
+v = window.voucher
+window.show_screen(0)
+v.reset()
+settle()
+
+# As asked 2026-10-20: "show the balance under the account selection as of the
+# voucher date and change it based on amount we enter in voucher".
+standing = acc.balances().set_index("ledger").loc["Bank", "closing"]
+v.grid.cellWidget(0, 0).setCurrentText("Bank")
+settle()
+check("the balance appears as soon as the account is picked",
+      v.grid.item(0, 3).text(), acc.fmt_side(standing))
+v.grid.item(0, 1).setText("500")
+settle()
+check("a debit moves it the debit way",
+      v.grid.item(0, 3).text(), acc.fmt_side(standing + 500))
+v.grid.item(0, 1).setText("")
+v.grid.item(0, 2).setText("500")
+settle()
+check("and a credit the other way",
+      v.grid.item(0, 3).text(), acc.fmt_side(standing - 500))
+check("the column is told, not typed",
+      bool(v.grid.item(0, 3).flags() & QtCore.Qt.ItemIsEditable), False)
+
+# AS AT THE VOUCHER DATE, which is the whole point: the vouchers in this book
+# are dated today, so the day before shows the opening balance alone.
+v.reset()
+settle()
+yesterday = date.today() - timedelta(days=1)
+v.date_edit.setDate(desktop.to_qdate(yesterday))
+settle()
+v.grid.cellWidget(0, 0).setCurrentText("Bank")
+settle()
+check("an earlier date shows the balance as it stood then",
+      v.grid.item(0, 3).text(),
+      acc.fmt_side(acc.balances(yesterday).set_index("ledger")
+                   .loc["Bank", "closing"]))
+check("which is not the same figure",
+      v.grid.item(0, 3).text() != acc.fmt_side(standing), True)
+
+# Two lines on ONE ledger accumulate, rather than both showing the same.
+v.reset()
+settle()
+v.grid.cellWidget(0, 0).setCurrentText("Bank")
+v.grid.item(0, 1).setText("100")
+settle()
+v.grid.cellWidget(1, 0).setCurrentText("Bank")
+v.grid.item(1, 1).setText("100")
+settle()
+check("a second line on the same ledger carries on from the first",
+      [v.grid.item(0, 3).text(), v.grid.item(1, 3).text()],
+      [acc.fmt_side(standing + 100), acc.fmt_side(standing + 200)])
+
+# THE TRAP: altering a voucher that is already in the books. The saved copy
+# must be taken out of the base, or the line adds on top of itself and every
+# balance reads double.
+v.reset()
+window.show_screen(1)
+window.daybook.refresh()
+settle()
+altering = int(window.daybook.table.key_at(0))
+head, saved = db.get_voucher(altering)
+names = [str(line["ledger_name"]) for line in saved]
+window._alter(altering)
+settle()
+as_at = date.fromisoformat(str(head["voucher_date"]))
+truth = acc.balances(as_at).set_index("ledger")["closing"]
+if len(names) == len(set(names)):
+    check("an unchanged alteration shows the balance the books really hold",
+          [v.grid.item(r, 3).text() for r in range(len(names))],
+          [acc.fmt_side(float(truth.loc[n])) for n in names])
+v.reset()
+settle()
+
 print("\n24) The shortcuts actually fire, pressed for real")
 # Binding a key is not the same as the key working, which is the whole lesson
 # of the Alt+C bug - so press it for real and see whether the action runs.
