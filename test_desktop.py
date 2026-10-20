@@ -30,6 +30,7 @@ os.environ["BOOKS_DIR"] = str(SANDBOX)
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
+import pandas as pd  # noqa: E402
 import accounting as acc  # noqa: E402
 import db  # noqa: E402
 import desktop  # noqa: E402
@@ -65,10 +66,10 @@ app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 window = desktop.MainWindow()
 
 print("\n1) The window opens with every screen")
-check("nine screens", window.stack.count(), 9)
+check("ten screens", window.stack.count(), 10)
 check("screen names", [name.replace("&&", "&") for name, _ in window.screens],
       ["Voucher Entry", "Day Book", "Ledger", "Trial Balance", "Profit & Loss",
-       "Balance Sheet", "Outstanding", "Masters", "Company"])
+       "Balance Sheet", "Outstanding", "GST", "Masters", "Company"])
 check("starts on voucher entry", window.stack.currentIndex(), 0)
 check("title names the company and the app",
       "Bookkeeper Plus" in window.windowTitle(), True)
@@ -226,7 +227,8 @@ menu_letters = {m.title().split("&")[1][0].upper()
 shortcuts = [s for s in voucher.findChildren(QtGui.QShortcut)
              if s.key().toString().startswith("Alt+")]
 keys = sorted(s.key().toString() for s in shortcuts)
-check("the voucher screen's Alt shortcuts", keys, ["Alt+B", "Alt+L"])
+check("the voucher screen's Alt shortcuts", keys,
+      ["Alt+B", "Alt+L", "Alt+T"])
 check("none of them is a letter the menu bar owns",
       [k for k in keys if k.rsplit("+", 1)[1].upper() in menu_mnemonics], [])
 check("L is not claimed by a menu", "L" in menu_letters, False)
@@ -1106,9 +1108,9 @@ check("the printed page groups the thousands",
 # The input screens are not reports, and must say so rather than printing
 # something arbitrary.
 # Voucher Entry, Masters and Company hold INPUT, so there is nothing to
-# print. Outstanding moved in at index 6 and IS a report, so the input
-# screens are now 0, 7 and 8.
-for index in (0, 7, 8):
+# print. Outstanding and GST moved in at 6 and 7 and ARE reports, so the
+# input screens are now 0, 8 and 9.
+for index in (0, 8, 9):
     window.show_screen(index)
     settle()
     check(f"screen {index} ({window.screens[index][0]}) is not a report",
@@ -1116,11 +1118,14 @@ for index in (0, 7, 8):
 window.show_screen(6)
 settle()
 check("but Outstanding is", window.current_report().title, "Outstanding")
+window.show_screen(7)
+settle()
+check("and so is GST", window.current_report().title.startswith("GST"), True)
 # Back to an input screen BEFORE the calls below. They are here to prove
 # print/export are harmless when there is nothing to print - and on a report
 # screen print_current() opens the print preview, which blocks for ever with
 # nobody to dismiss it.
-window.show_screen(7)
+window.show_screen(8)
 settle()
 window.print_current()          # must not raise, and must not print
 window.export_current()
@@ -1459,6 +1464,167 @@ check("it prints as a report with its tables",
       [s.heading for s in report.sections][:1], ["Bills outstanding"])
 check("and carries the totals, which live in a label not a table",
       any("Receivable" in n for n in report.notes), True)
+
+print("\n26) GST: the dialog, the lines it writes, and the report")
+db.use_company(TMP)
+db.save_company({**db.get_company(), "company_name": "Aarkaya Handicrafts LLC",
+                 "pan": "AAAPZ1234C", "gstin": "29AAAPZ1234C1Z5"})
+window.company.refresh()
+check("our state comes from our GSTIN", db.company_state_code(), "29")
+
+# Set a rate on an EXISTING ledger through Masters, which is the only way to
+# do it from this screen.
+db.add_ledger("GST Sales", "Sales Accounts")
+window.masters.refresh()
+settle()
+row = window.masters._ledger_names.index("GST Sales")
+window.masters.ledger_table.setCurrentCell(row, 0)
+window.masters.led_rate.setText("18")
+window.masters.apply_gst_to_selected()
+settle()
+check("Set GST on selected puts a rate on a ledger that already existed",
+      float(db.get_ledgers().set_index("name").loc["GST Sales", "gst_rate"]),
+      18.0)
+check("and says so", "taxable at 18%" in window.statusBar().currentMessage(),
+      True)
+
+# Blank means not taxable, which is NOT the same as zero.
+window.masters.led_rate.setText("")
+window.masters.apply_gst_to_selected()
+settle()
+check("blanking the rate makes it untaxable again",
+      db.get_ledgers().set_index("name").loc["GST Sales", "gst_rate"] is None
+      or pd.isna(db.get_ledgers().set_index("name").loc["GST Sales", "gst_rate"]),
+      True)
+window.masters.led_rate.setText("18")
+window.masters.apply_gst_to_selected()
+settle()
+check("rubbish in the rate box is refused",
+      window.masters._typed_rate.__self__ is window.masters, True)
+try:
+    window.masters.led_rate.setText("eighteen")
+    window.masters._typed_rate()
+    check("a rate that is not a number is refused", "allowed", "refused")
+except ValueError as exc:
+    check("a rate that is not a number is refused", "refused", "refused")
+    check("and says to leave it blank instead",
+          "blank" in str(exc), True)
+window.masters.led_rate.setText("18")
+
+db.add_ledger("GST Local", "Sundry Debtors", gstin="29BBBPZ1234C1Z5",
+              state_code="29")
+db.add_ledger("GST Far", "Sundry Debtors", gstin="27CCCPZ1234C1Z5",
+              state_code="27")
+window.voucher.reload_ledgers()
+settle()
+
+# --- the dialog's arithmetic -------------------------------------------- #
+local = desktop.GstDialog(window.voucher, taxable=-10_000.0,
+                          voucher_type="Sales", party="GST Local",
+                          party_gstin="29BBBPZ1234C1Z5", suggested_rate=18.0,
+                          place_of_supply="29")
+got = local.computed()
+check("a supply in our own state splits into CGST and SGST",
+      (got["supply_type"], got["cgst"], got["sgst"], got["igst"]),
+      ("intra", 900.0, 900.0, 0.0))
+far = desktop.GstDialog(window.voucher, taxable=-10_000.0,
+                        voucher_type="Sales", party="GST Far",
+                        party_gstin="27CCCPZ1234C1Z5", suggested_rate=18.0,
+                        place_of_supply="27")
+got = far.computed()
+check("one to another state is all IGST",
+      (got["supply_type"], got["cgst"], got["igst"]), ("inter", 0.0, 1800.0))
+check("and it says why", "IGST" in far.note.text(), True)
+
+# A GSTIN names its own state, so typing one moves the place of supply.
+typed = desktop.GstDialog(window.voucher, taxable=-1_000.0,
+                          voucher_type="Sales", party="Someone")
+typed.gstin.setText("19ZZZPZ1234C1Z5")
+settle()
+check("typing a GSTIN sets the place of supply from it",
+      typed.place.currentData(), "19")
+check("which makes the supply interstate",
+      typed.computed()["supply_type"], "inter")
+
+# --- the lines it writes ------------------------------------------------- #
+_real_exec = desktop.GstDialog.exec
+desktop.GstDialog.exec = lambda self: (self._accept(), 1)[1]
+
+voucher = window.voucher
+voucher.reset()
+voucher.type_box.setCurrentText("Sales")
+set_row(voucher, 0, "GST Sales", credit=10_000)
+set_row(voucher, 1, "GST Local", debit=10_000)
+settle()
+check("GST is offered on a Sales voucher", voucher.gst_button.isEnabled(), True)
+check("and the taxable line is found", voucher._taxable_rows(), [0])
+voucher.edit_gst()
+settle()
+posted = {voucher.grid.cellWidget(r, 0).currentText():
+          voucher._row_amount(r)
+          for r in range(voucher.grid.rowCount())
+          if voucher.grid.cellWidget(r, 0)
+          and voucher.grid.cellWidget(r, 0).currentText().strip()}
+check("the tax lines are written on the same side as the supply",
+      (posted["Output CGST"], posted["Output SGST"]), (-900.0, -900.0))
+check("and the party carries the whole invoice",
+      posted["GST Local"], 11_800.0)
+check("so the voucher balances", voucher.gap_label.text(), "Difference 0.00")
+check("the rate and place of supply are held for saving",
+      (voucher._gst["rate"], voucher._gst["place_of_supply"]), (18.0, "29"))
+
+# Applying again must REPLACE the tax lines, not add a second set.
+voucher.edit_gst()
+settle()
+check("applying GST twice does not stack a second set of tax lines",
+      len(voucher._tax_rows()), 2)
+check("and it still balances", voucher.gap_label.text(), "Difference 0.00")
+
+window._accept()
+settle()
+summary = acc.gst_summary()
+check("posting puts the tax on the GST return",
+      summary["totals"]["output_tax"], 1_800.0)
+# The check that matters: the return must equal the tax LEDGERS.
+held = acc.balances().set_index("ledger")
+check("and the return equals the Output tax ledgers",
+      summary["totals"]["output_tax"],
+      round(sum(abs(float(held.loc[f"Output {t}", "closing"]))
+                for t in ("CGST", "SGST", "IGST")), 2), tol=0.0)
+
+# GST belongs to Sales and Purchase only.
+voucher.reset()
+voucher.type_box.setCurrentText("Journal")
+settle()
+check("GST is not offered on a Journal", voucher.gst_button.isEnabled(), False)
+voucher.reset()
+desktop.GstDialog.exec = _real_exec
+
+# --- the GST screen ----------------------------------------------------- #
+screen = window.gst
+window.refresh_all()
+settle()
+check("the GST screen opens on the summary",
+      screen.view.currentText(), "Summary")
+check("which names what is payable", "Payable" in screen.totals.text(), True)
+check("and explains the figure",
+      "payable" in screen.status.text().lower(), True)
+check("it prints the rate breakdowns",
+      [s.heading for s in screen.report().sections][:1],
+      ["Outward supplies, by rate"])
+
+screen.view.setCurrentText("Outward supplies")
+settle()
+check("the outward register lists the invoice",
+      len(screen._register), 1)
+check("with the place of supply spelled out",
+      str(screen._register.iloc[0]["Place of supply"]), "Karnataka")
+check("and it prints under its own heading",
+      [s.heading for s in screen.report().sections], ["Outward supplies"])
+check("the printed report carries the totals, which live in a label",
+      any("Output" in n for n in screen.report().notes), True)
+screen.view.setCurrentText("Summary")
+settle()
 
 # The real data folder must be untouched by any of this.
 check("the suite wrote only into its sandbox",

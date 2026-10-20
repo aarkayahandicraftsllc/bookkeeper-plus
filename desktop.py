@@ -983,6 +983,138 @@ class BillsDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class GstDialog(QtWidgets.QDialog):
+    """Work out the GST on a voucher and say what lines it needs.
+
+    Asks only what cannot be worked out: the rate and the place of supply.
+    Whether that means CGST+SGST or IGST follows from the place of supply
+    against our own state, so it is shown rather than asked.
+
+    The dialog computes; `VoucherScreen.apply_gst` puts the lines in the
+    grid. Keeping those apart means the arithmetic can be tested without
+    driving a grid, and the grid stays the one place lines are written.
+    """
+
+    def __init__(self, parent, *, taxable: float, voucher_type: str,
+                 party: str = "", party_gstin: str = "",
+                 suggested_rate: float = 18.0,
+                 place_of_supply: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("GST")
+        self.taxable = round(float(taxable), 2)
+        self.voucher_type = voucher_type
+        self.party = party
+        self.result_gst: dict | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        ours = db.company_state_code()
+        layout.addWidget(flowing(QtWidgets.QLabel(
+            f"Taxable value <b>{money(abs(self.taxable))}</b>"
+            + (f" &nbsp;·&nbsp; {party}" if party else "")
+            + (f" &nbsp;·&nbsp; we are in {db.state_name(ours)}" if ours
+               else " &nbsp;·&nbsp; <b>our GSTIN is not set</b>, so every "
+                    "supply will look local"))))
+
+        form = QtWidgets.QFormLayout()
+        self.rate = QtWidgets.QComboBox()
+        self.rate.setEditable(True)
+        self.rate.addItems([f"{r:g}" for r in db.GST_SLABS])
+        self.rate.setCurrentText(f"{float(suggested_rate):g}")
+        self.rate.currentTextChanged.connect(self._recompute)
+        form.addRow("Rate %", self.rate)
+
+        self.place = QtWidgets.QComboBox()
+        self.place.addItem("Unregistered or unknown", "")
+        for code, name in sorted(db.STATE_CODES.items(),
+                                 key=lambda kv: kv[1]):
+            self.place.addItem(f"{name} ({code})", code)
+        wanted = place_of_supply or db.state_code_of(party_gstin) or ours
+        if wanted:
+            found = self.place.findData(wanted)
+            if found >= 0:
+                self.place.setCurrentIndex(found)
+        self.place.currentTextChanged.connect(self._recompute)
+        form.addRow("Place of supply", self.place)
+
+        self.gstin = QtWidgets.QLineEdit(party_gstin)
+        self.gstin.setPlaceholderText("the party's GSTIN, if they have one")
+        self.gstin.textChanged.connect(self._gstin_typed)
+        form.addRow("Party GSTIN", self.gstin)
+        layout.addLayout(form)
+
+        self.breakdown = QtWidgets.QLabel()
+        apply_mono(self.breakdown)
+        layout.addWidget(self.breakdown)
+        self.note = flowing(QtWidgets.QLabel())
+        layout.addWidget(self.note)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QtWidgets.QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        self.ok = QtWidgets.QPushButton("Apply")
+        self.ok.setDefault(True)
+        self.ok.clicked.connect(self._accept)
+        buttons.addWidget(self.ok)
+        layout.addLayout(buttons)
+
+        self._recompute()
+
+    def _gstin_typed(self, text: str) -> None:
+        """A GSTIN names its own state, so typing one sets the place."""
+        code = db.state_code_of(text)
+        if code:
+            found = self.place.findData(code)
+            if found >= 0 and self.place.currentData() != code:
+                self.place.setCurrentIndex(found)
+        self._recompute()
+
+    def chosen_rate(self) -> float:
+        return parse_amount(self.rate.currentText())
+
+    def computed(self) -> dict:
+        place = self.place.currentData() or ""
+        kind = db.supply_type(place)
+        tax = db.split_tax(abs(self.taxable), self.chosen_rate(), kind)
+        return {"supply_type": kind, "place_of_supply": place, **tax,
+                "rate": self.chosen_rate(),
+                "total": round(sum(tax.values()), 2)}
+
+    def _recompute(self, *_args) -> None:
+        got = self.computed()
+        if got["supply_type"] == "inter":
+            self.breakdown.setText(
+                f"IGST {money(got['igst'])}   "
+                f"Invoice {money(abs(self.taxable) + got['total'])}")
+            self.note.setText(
+                "Interstate, so the whole rate goes on IGST.")
+        else:
+            self.breakdown.setText(
+                f"CGST {money(got['cgst'])}   SGST {money(got['sgst'])}   "
+                f"Invoice {money(abs(self.taxable) + got['total'])}")
+            self.note.setText(
+                "Within our state, so the rate is split between CGST and "
+                "SGST.")
+        tone(self.note, "muted")
+        if not self.taxable:
+            self.note.setText(
+                "Nothing to tax yet — put the amount on the sales or purchase "
+                "line first.")
+            tone(self.note, "warn")
+        self.ok.setEnabled(bool(self.taxable))
+
+    def _accept(self) -> None:
+        got = self.computed()
+        self.result_gst = {
+            "rate": got["rate"], "supply_type": got["supply_type"],
+            "place_of_supply": got["place_of_supply"],
+            "party_gstin": self.gstin.text().strip().upper(),
+            "cgst": got["cgst"], "sgst": got["sgst"], "igst": got["igst"],
+        }
+        self.accept()
+
+
 class VoucherScreen(QtWidgets.QWidget):
     """The screen you live in: type, date, number, then a Dr/Cr grid."""
 
@@ -993,6 +1125,9 @@ class VoucherScreen(QtWidgets.QWidget):
         super().__init__(parent)
         self.editing_id: int | None = None
         self.editing_voided = False
+        # The GST facts of the voucher being entered: what the lines cannot
+        # say. None until Alt+T has been through.
+        self._gst: dict | None = None
         layout = QtWidgets.QVBoxLayout(self)
 
         self.title = heading("Voucher Entry")
@@ -1058,10 +1193,16 @@ class VoucherScreen(QtWidgets.QWidget):
             "Attach this line to a bill — open a new one, or settle open "
             "ones. Only for ledgers that keep bills.")
         self.bills_button.clicked.connect(self.edit_bills)
+        self.gst_button = QtWidgets.QPushButton("GST…  (Alt+T)")
+        self.gst_button.setToolTip(
+            "Work out the GST on this voucher and put the tax lines on it. "
+            "Sales and Purchase vouchers only.")
+        self.gst_button.clicked.connect(self.edit_gst)
         buttons.addWidget(add)
         buttons.addWidget(remove)
         buttons.addWidget(create)
         buttons.addWidget(self.bills_button)
+        buttons.addWidget(self.gst_button)
         buttons.addStretch(1)
         layout.addLayout(buttons)
 
@@ -1121,6 +1262,10 @@ class VoucherScreen(QtWidgets.QWidget):
         bills_key = QtGui.QShortcut(QtGui.QKeySequence("Alt+B"), self)
         bills_key.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
         bills_key.activated.connect(self.edit_bills)
+
+        gst_key = QtGui.QShortcut(QtGui.QKeySequence("Alt+T"), self)
+        gst_key.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        gst_key.activated.connect(self.edit_gst)
 
         self.reset()
 
@@ -1222,6 +1367,9 @@ class VoucherScreen(QtWidgets.QWidget):
         self.bills_button.setEnabled(
             not self.editing_voided
             and self._bill_wise_row(self.grid.currentRow()) is not None)
+        self.gst_button.setEnabled(
+            not self.editing_voided
+            and self.type_box.currentText() in (acc.OUTWARD + acc.INWARD))
 
         notes = db.voucher_type_warnings(
             self.type_box.currentText(), rows, self._ledgers)
@@ -1319,6 +1467,7 @@ class VoucherScreen(QtWidgets.QWidget):
         self.reload_ledgers()
         self.editing_id = None
         self.editing_voided = False
+        self._gst = None
         self.title.setText("Voucher Entry")
         self.cancel_button.setVisible(False)
         self.delete_button.setVisible(False)
@@ -1342,6 +1491,9 @@ class VoucherScreen(QtWidgets.QWidget):
         self.reload_ledgers()
         self.editing_id = int(head["id"])
         self.editing_voided = bool(head.get("voided", 0))
+        # So that re-accepting an invoice keeps its rate and place of supply
+        # rather than silently dropping it off the return.
+        self._gst = db.get_gst_details(int(head["id"]))
         self.title.setText(
             (f"Voided {head['voucher_type']} voucher no. {head['number']}"
              if self.editing_voided else
@@ -1367,6 +1519,159 @@ class VoucherScreen(QtWidgets.QWidget):
                           float(line["credit"]),
                           [b for b in line.get("bills", [])
                            if b.get("kind") != "on_account"])
+        self._recalculate()
+
+    def _ledger_row(self, name: str):
+        """That ledger's master row, or None."""
+        lid = self._ledger_ids.get(name)
+        if lid is None or self._ledgers.empty:
+            return None
+        found = self._ledgers[self._ledgers["id"].astype(int) == int(lid)]
+        return None if found.empty else found.iloc[0]
+
+    def _taxable_rows(self) -> list[int]:
+        """Grid rows on a ledger that carries a GST rate.
+
+        A rate of 0 counts: nil-rated and exempt supplies are taxable at
+        zero and still belong on the return, which is why the column is
+        nullable rather than defaulting to 0.
+        """
+        rows = []
+        for row in range(self.grid.rowCount()):
+            combo = self.grid.cellWidget(row, 0)
+            master = self._ledger_row(combo.currentText().strip()
+                                      if combo else "")
+            if master is None or str(master.get("gst_role") or ""):
+                continue
+            rate = master.get("gst_rate")
+            if rate is not None and not pd.isna(rate):
+                rows.append(row)
+        return rows
+
+    def _row_amount(self, row: int) -> float:
+        debit = parse_amount(self.grid.item(row, 1).text()
+                             if self.grid.item(row, 1) else "")
+        credit = parse_amount(self.grid.item(row, 2).text()
+                              if self.grid.item(row, 2) else "")
+        return round(debit - credit, 2)
+
+    def _set_row_amount(self, row: int, signed: float) -> None:
+        self._loading = True
+        for col, value in ((1, signed if signed > 0 else 0.0),
+                           (2, -signed if signed < 0 else 0.0)):
+            item = self.grid.item(row, col)
+            if item is None:
+                item = QtWidgets.QTableWidgetItem()
+                item.setTextAlignment(QtCore.Qt.AlignRight
+                                      | QtCore.Qt.AlignVCenter)
+                item.setFont(mono_font())
+                self.grid.setItem(row, col, item)
+            item.setText(f"{value:,.2f}" if value else "")
+        self._loading = False
+
+    def _tax_rows(self) -> list[int]:
+        rows = []
+        for row in range(self.grid.rowCount()):
+            combo = self.grid.cellWidget(row, 0)
+            master = self._ledger_row(combo.currentText().strip()
+                                      if combo else "")
+            if master is not None and str(master.get("gst_role") or ""):
+                rows.append(row)
+        return rows
+
+    def edit_gst(self) -> None:
+        """Alt+T: work out the GST and put the tax lines on the voucher."""
+        if self.type_box.currentText() not in (acc.OUTWARD + acc.INWARD):
+            QtWidgets.QMessageBox.information(
+                self, "Not a taxable voucher",
+                "GST goes on a Sales or Purchase voucher. Use the voucher "
+                "type for the supply and the tax follows.")
+            return
+        taxable_rows = self._taxable_rows()
+        if not taxable_rows:
+            QtWidgets.QMessageBox.information(
+                self, "Nothing taxable on this voucher",
+                "Put the amount on a sales or purchase ledger that carries a "
+                "GST rate. The rate is set on the ledger, on the Masters "
+                "screen.")
+            return
+        taxable = round(sum(self._row_amount(r) for r in taxable_rows), 2)
+
+        # The party is the line running the OTHER way - the one the invoice
+        # total lands on.
+        party_rows = [r for r in range(self.grid.rowCount())
+                      if r not in taxable_rows and r not in self._tax_rows()
+                      and self._row_amount(r)
+                      and (self._row_amount(r) > 0) != (taxable > 0)]
+        party_row = party_rows[0] if party_rows else None
+        party_master = (self._ledger_row(
+            self.grid.cellWidget(party_row, 0).currentText().strip())
+            if party_row is not None else None)
+
+        rates = {float(self._ledger_row(
+            self.grid.cellWidget(r, 0).currentText().strip())["gst_rate"])
+            for r in taxable_rows}
+        existing = self._gst or {}
+        dialog = GstDialog(
+            self, taxable=taxable, voucher_type=self.type_box.currentText(),
+            party=str(party_master["name"]) if party_master is not None else "",
+            party_gstin=str(existing.get("party_gstin")
+                            or (party_master.get("gstin")
+                                if party_master is not None else "") or ""),
+            suggested_rate=float(existing.get("rate") or
+                                 (sorted(rates)[-1] if rates else 18.0)),
+            place_of_supply=str(existing.get("place_of_supply")
+                                or (party_master.get("state_code")
+                                    if party_master is not None else "") or ""))
+        if len(rates) > 1:
+            QtWidgets.QMessageBox.information(
+                self, "More than one rate",
+                "The taxable lines on this voucher carry different rates, and "
+                "GST is worked out at ONE rate per voucher. The highest is "
+                "offered; split the invoice if that is wrong.")
+        if not dialog.exec() or dialog.result_gst is None:
+            return
+        got = dialog.result_gst
+
+        # Out with the old tax lines before the new, so changing the rate
+        # replaces them rather than stacking another set underneath.
+        for row in sorted(self._tax_rows(), reverse=True):
+            self.grid.removeRow(row)
+
+        roles = db.gst_ledger_ids()
+        prefix = ("output" if self.type_box.currentText() in acc.OUTWARD
+                  else "input")
+        by_id = self._ledgers.set_index("id")
+        side = 1.0 if taxable > 0 else -1.0
+        tax_total = 0.0
+        for part in ("cgst", "sgst", "igst"):
+            amount = round(float(got.get(part) or 0), 2)
+            if not amount:
+                continue
+            lid = roles.get(f"{prefix}_{part}")
+            if lid is None or lid not in by_id.index:
+                continue
+            # Tax sits on the SAME side as the supply; the party carries the
+            # whole invoice on the other.
+            self._add_row(str(by_id.loc[lid, "name"]),
+                          amount if side > 0 else 0.0,
+                          amount if side < 0 else 0.0)
+            tax_total = round(tax_total + amount, 2)
+
+        if party_row is not None:
+            self._set_row_amount(party_row, -(taxable + side * tax_total))
+            # The party line's bill allocations were for the old total.
+            combo = self.grid.cellWidget(party_row, 0)
+            if getattr(combo, "_bills", []):
+                combo._bills = []
+
+        self._gst = {
+            "rate": got["rate"], "supply_type": got["supply_type"],
+            "place_of_supply": got["place_of_supply"],
+            "party_gstin": got["party_gstin"],
+            "party_ledger_id": (int(party_master["id"])
+                                if party_master is not None else None),
+        }
         self._recalculate()
 
     def _bill_wise_row(self, row: int) -> tuple[int, str] | None:
@@ -1516,6 +1821,7 @@ class VoucherScreen(QtWidgets.QWidget):
                 narration=self.narration.text(),
                 lines=rows,
                 voucher_id=self.editing_id,
+                gst=self._gst,
             )
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Cannot accept", str(exc))
@@ -2394,6 +2700,152 @@ class OutstandingScreen(QtWidgets.QWidget):
                 self.open_voucher.emit(int(found.iloc[0]["voucher_id"]))
 
 
+class GstScreen(QtWidgets.QWidget):
+    """What GST was charged, what was paid, and what is left to hand over."""
+
+    open_voucher = QtCore.Signal(int)
+
+    SUMMARY = "Summary"
+    OUTWARD = "Outward supplies"
+    INWARD = "Inward supplies"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(heading("GST"))
+
+        # A period, not an as-at: GST is returned for a month or a quarter.
+        self.period = PeriodBar()
+        self.period.changed.connect(self.refresh)
+        layout.addWidget(self.period)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.addWidget(QtWidgets.QLabel("Show"))
+        self.view = QtWidgets.QComboBox()
+        self.view.addItems([self.SUMMARY, self.OUTWARD, self.INWARD])
+        self.view.setToolTip(
+            "Summary is what you owe. The two registers list it invoice by "
+            "invoice, the shape a return asks for.")
+        self.view.currentTextChanged.connect(self.refresh)
+        controls.addWidget(self.view)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        # Its own row: an unwrapped mono label is what pins a screen open.
+        totals_row = QtWidgets.QHBoxLayout()
+        totals_row.addStretch(1)
+        self.totals = QtWidgets.QLabel()
+        apply_mono(self.totals)
+        totals_row.addWidget(self.totals)
+        layout.addLayout(totals_row)
+
+        self.status = flowing(QtWidgets.QLabel())
+        layout.addWidget(self.status)
+
+        self.first_label = QtWidgets.QLabel()
+        layout.addWidget(self.first_label)
+        self.first = FrameTable()
+        self.first.doubleClicked.connect(self._open)
+        layout.addWidget(self.first, 2)
+
+        self.second_label = QtWidgets.QLabel()
+        layout.addWidget(self.second_label)
+        self.second = FrameTable()
+        layout.addWidget(self.second, 1)
+
+        self.third_label = QtWidgets.QLabel()
+        layout.addWidget(self.third_label)
+        self.third = FrameTable()
+        layout.addWidget(self.third, 1)
+
+        layout.addWidget(ReportActions(self.report))
+        self._sections: list[ReportSection] = []
+        self._register = pd.DataFrame()
+
+    def report(self) -> Report:
+        return Report(
+            title=f"GST — {self.view.currentText()}",
+            period=period_caption(self.period),
+            sections=self._sections,
+            # The totals and the warning are LABELS, so a printed report
+            # without them loses the figure that was wanted.
+            notes=[self.totals.text(), self.status.text()])
+
+    def _show(self, sections: list[tuple[str, pd.DataFrame, tuple]]) -> None:
+        self._sections = [ReportSection(h, f, n) for h, f, n in sections]
+        for (label, table), part in zip(
+                ((self.first_label, self.first),
+                 (self.second_label, self.second),
+                 (self.third_label, self.third)),
+                sections + [("", pd.DataFrame(), ())] * 3):
+            heading_text, frame, numeric = part
+            label.setText(heading_text)
+            label.setVisible(bool(heading_text) and not frame.empty)
+            table.setVisible(bool(heading_text) and not frame.empty)
+            if not frame.empty:
+                table.load(frame, numeric=numeric)
+
+    def refresh(self) -> None:
+        start, end = self.period.range()
+        summary = acc.gst_summary(start, end)
+        totals = summary["totals"]
+        self.totals.setText(
+            f"Output {money(totals['output_tax'])}"
+            f"   Input {money(totals['input_tax'])}"
+            f"   {'Payable' if totals['net'] >= 0 else 'Credit'}"
+            f" {money(abs(totals['net']))}")
+
+        view = self.view.currentText()
+        if view == self.SUMMARY:
+            self._register = pd.DataFrame()
+            money_cols = ("Taxable", "CGST", "SGST", "IGST", "Tax")
+            self._show([
+                ("Outward supplies, by rate", summary["outward"], money_cols),
+                ("Inward supplies, by rate", summary["inward"], money_cols),
+                ("Outward supplies, by where they went",
+                 summary["by_supply"], ("Taxable", "Tax")),
+            ])
+        else:
+            self._register = acc.gst_register(start, end,
+                                              outward=view == self.OUTWARD)
+            shown = (self._register.drop(columns=["voucher_id"])
+                     if not self._register.empty else self._register)
+            self._show([(view, shown,
+                         ("Taxable", "CGST", "SGST", "IGST", "Total"))])
+
+        if not totals["output_tax"] and not totals["input_tax"]:
+            self.status.setText(
+                "No GST on any voucher in this period. Put a rate on your "
+                "sales and purchase ledgers, then use GST (Alt+T) on a Sales "
+                "or Purchase voucher.")
+            tone(self.status, "muted")
+        elif totals["net"] >= 0:
+            self.status.setText(
+                f"{money(totals['net'])} of GST is payable — "
+                f"{money(totals['output_tax'])} collected on sales, less "
+                f"{money(totals['input_tax'])} already paid on purchases.")
+            tone(self.status, "warn")
+        else:
+            self.status.setText(
+                f"{money(abs(totals['net']))} of input credit is left over, "
+                f"having paid more GST on purchases than was collected on "
+                f"sales. It carries forward.")
+            tone(self.status, "good")
+
+        if not db.company_state_code():
+            self.status.setText(
+                self.status.text()
+                + "  Our own GSTIN is not set on the Company screen, so every "
+                  "supply is being treated as local and no IGST will ever be "
+                  "worked out.")
+            tone(self.status, "bad")
+
+    def _open(self, index) -> None:
+        if not self._register.empty and 0 <= index.row() < len(self._register):
+            self.open_voucher.emit(
+                int(self._register.iloc[index.row()]["voucher_id"]))
+
+
 class MastersScreen(QtWidgets.QWidget):
     changed = QtCore.Signal()
 
@@ -2431,6 +2883,27 @@ class MastersScreen(QtWidgets.QWidget):
         form.addWidget(self.led_open, 1, 1)
         form.addWidget(QtWidgets.QLabel("Dr / Cr"), 1, 2)
         form.addWidget(self.led_side, 1, 3)
+
+        # GST. A plain spin box could not express the difference that
+        # matters: BLANK means the ledger is not taxable, 0 means it is
+        # taxable at nil rate - and a nil-rated supply still goes on the
+        # return.
+        self.led_rate = QtWidgets.QLineEdit()
+        self.led_rate.setPlaceholderText("blank if not taxable; 0 for nil "
+                                         "rated")
+        self.led_gstin = QtWidgets.QLineEdit()
+        self.led_gstin.setPlaceholderText("a customer's or supplier's GSTIN")
+        self.led_state = QtWidgets.QComboBox()
+        self.led_state.addItem("From the GSTIN", "")
+        for code, name in sorted(db.STATE_CODES.items(),
+                                 key=lambda kv: kv[1]):
+            self.led_state.addItem(f"{name} ({code})", code)
+        form.addWidget(QtWidgets.QLabel("GST rate %"), 2, 0)
+        form.addWidget(self.led_rate, 2, 1)
+        form.addWidget(QtWidgets.QLabel("GSTIN"), 2, 2)
+        form.addWidget(self.led_gstin, 2, 3)
+        form.addWidget(QtWidgets.QLabel("State"), 3, 0)
+        form.addWidget(self.led_state, 3, 1)
         ledger_layout.addLayout(form)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -2438,7 +2911,15 @@ class MastersScreen(QtWidgets.QWidget):
         create.clicked.connect(self.create_ledger)
         delete = QtWidgets.QPushButton("Delete selected")
         delete.clicked.connect(self.delete_ledger)
+        # The only way to change an EXISTING ledger from this screen. Without
+        # it a rate could only ever be set on a brand new ledger, which is no
+        # use to books that already have their customers in them.
+        apply_gst = QtWidgets.QPushButton("Set GST on selected")
+        apply_gst.setToolTip("Put the GST rate, GSTIN and state above onto "
+                             "the ledger selected in the list")
+        apply_gst.clicked.connect(self.apply_gst_to_selected)
         buttons.addWidget(create)
+        buttons.addWidget(apply_gst)
         buttons.addWidget(delete)
         buttons.addStretch(1)
         ledger_layout.addLayout(buttons)
@@ -2503,17 +2984,72 @@ class MastersScreen(QtWidgets.QWidget):
     def _warn(self, exc: Exception) -> None:
         QtWidgets.QMessageBox.warning(self, "Cannot do that", str(exc))
 
+    def _typed_rate(self) -> float | None:
+        """The rate box as a number, or None when it is blank."""
+        text = self.led_rate.text().strip().rstrip("%").strip()
+        if not text:
+            return None
+        try:
+            return round(float(text), 2)
+        except ValueError:
+            raise ValueError(f"{self.led_rate.text()!r} is not a GST rate. "
+                             f"Leave it blank if the ledger is not taxable.")
+
     def create_ledger(self) -> None:
         try:
             db.add_ledger(self.led_name.text(), self.led_group.currentText(),
-                          self.led_open.value(), self.led_side.currentText())
+                          self.led_open.value(), self.led_side.currentText(),
+                          gst_rate=self._typed_rate(),
+                          gstin=self.led_gstin.text().strip().upper(),
+                          state_code=self.led_state.currentData() or "")
         except ValueError as exc:
             self._warn(exc)
             return
         self.led_name.clear()
         self.led_open.setValue(0)
+        self.led_rate.clear()
+        self.led_gstin.clear()
+        self.led_state.setCurrentIndex(0)
         self.refresh()
         self.changed.emit()
+
+    def apply_gst_to_selected(self) -> None:
+        """Put the GST boxes onto the ledger picked in the list."""
+        row = self.ledger_table.currentRow()
+        if row < 0 or row >= len(self._ledger_names):
+            self._warn(ValueError("Pick a ledger in the list first."))
+            return
+        name = self._ledger_names[row]
+        try:
+            rate = self._typed_rate()
+        except ValueError as exc:
+            self._warn(exc)
+            return
+        try:
+            # set_ledger_gst, not update_ledger: there None means "leave
+            # alone", so a blank rate box could never CLEAR a rate.
+            db.set_ledger_gst(
+                db.ledger_id(name), rate=rate,
+                gstin=self.led_gstin.text().strip().upper(),
+                state_code=self.led_state.currentData() or "")
+        except ValueError as exc:
+            self._warn(exc)
+            return
+        self.refresh()
+        self.changed.emit()
+        # Restored AFTER the emit, not before: changed is wired to the
+        # window's refresh_all(), which rebuilds this table again and would
+        # wipe a selection put back any earlier. Without this, setting GST on
+        # a second ledger needs re-picking it, and the click before that
+        # quietly acts on nothing.
+        if name in self._ledger_names:
+            self.ledger_table.setCurrentCell(self._ledger_names.index(name), 0)
+        window = self.window()
+        if isinstance(window, QtWidgets.QMainWindow):
+            window.statusBar().showMessage(
+                f"GST details set on {name}"
+                + (f" — taxable at {rate:g}%" if rate is not None
+                   else " — not taxable"), 6000)
 
     def delete_ledger(self) -> None:
         row = self.ledger_table.currentRow()
@@ -2901,6 +3437,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.profit = ProfitLossScreen()
         self.sheet = BalanceSheetScreen()
         self.outstanding = OutstandingScreen()
+        self.gst = GstScreen()
         self.masters = MastersScreen()
         self.company = CompanyScreen()
 
@@ -2912,6 +3449,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("Profit && Loss", self.profit),
             ("Balance Sheet", self.sheet),
             ("Outstanding", self.outstanding),
+            ("GST", self.gst),
             ("Masters", self.masters),
             ("Company", self.company),
         ]
@@ -2924,6 +3462,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.daybook.open_voucher.connect(self._alter)
         self.ledger.open_voucher.connect(self._alter)
         self.outstanding.open_voucher.connect(self._alter)
+        self.gst.open_voucher.connect(self._alter)
         # The company name is in the title bar and its currency symbol is in
         # every figure, so saving it has to reach the whole window.
         self.company.changed.connect(self._company_changed)

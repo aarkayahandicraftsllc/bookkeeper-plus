@@ -1111,6 +1111,29 @@ def update_ledger(ledger: int, name: str, group: str, opening: float,
         )
 
 
+def set_ledger_gst(ledger: int, *, rate: float | None, gstin: str = "",
+                   state_code: str = "") -> None:
+    """Set a ledger's GST details, unconditionally - including clearing them.
+
+    Separate from `update_ledger` because the two need `None` to mean
+    opposite things. There, None means "leave this alone", which is what
+    stops a caller that knows nothing about GST from wiping a rate while
+    saving a name. Here it means "not taxable", which is a value in its own
+    right and has to be settable - otherwise a rate put on by mistake could
+    never be taken off.
+    """
+    with connect() as conn:
+        if conn.execute("SELECT id FROM ledgers WHERE id = ?",
+                        (int(ledger),)).fetchone() is None:
+            raise ValueError("That ledger no longer exists.")
+        conn.execute(
+            "UPDATE ledgers SET gst_rate = ?, gstin = ?, state_code = ?"
+            " WHERE id = ?",
+            (None if rate is None else round(float(rate), 2),
+             (gstin or "").strip().upper(), (state_code or "").strip(),
+             int(ledger)))
+
+
 def ledger_usage(ledger: int) -> int:
     with connect() as conn:
         return conn.execute(

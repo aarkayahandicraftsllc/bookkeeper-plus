@@ -493,6 +493,58 @@ credit cash or bank, a Receipt should debit it, a Contra should be between two
 of them, a Journal should touch neither. You get told, not blocked, because
 real books occasionally need the exception.
 
+## GST
+
+Set a **GST rate** on each sales and purchase ledger (Masters ▸ GST rate %), and
+a **GSTIN** on each customer and supplier. Then on a Sales or Purchase voucher,
+**GST… (Alt+T)** works out the tax and writes the tax lines onto the voucher.
+After that it is an ordinary voucher — which is why every existing report
+already understands it.
+
+**Whether it is CGST+SGST or IGST is derived, not asked.** The first two
+characters of a GSTIN *are* the state code, so the place of supply against our
+own state is the whole decision. Our own state comes from our GSTIN rather than
+the typed State field, because the two can disagree and the tax follows the
+GSTIN. A place of supply left as *unregistered or unknown* counts as
+intra-state, which is what a counter sale is.
+
+Intra-state halves the rate. Each half is rounded on its own and the second
+takes the remainder, so 18% of 1,050 is 94.50 twice rather than losing a paisa
+against the invoice.
+
+The **GST screen** shows a summary — output tax, input tax and the net payable,
+broken down by rate and by where the supply went — or either register, invoice
+by invoice, in the shape an outward-supplies return asks for. All of it prints
+and exports.
+
+**A blank rate is not a zero rate.** Blank means the ledger is not taxable at
+all; `0` means it is taxable at nil rate, and a nil-rated supply still belongs
+on the return. That is why `ledgers.gst_rate` is nullable, and why
+`db.set_ledger_gst` exists separately from `db.update_ledger`: there `None`
+means "leave this alone", which is what stops a caller that knows nothing about
+GST from wiping a rate while saving a name.
+
+Six tax ledgers are seeded under **Duties & Taxes** and marked with a
+`gst_role`, so the report finds them however they are renamed and cannot lose
+them to a delete.
+
+**What is stored and what is worked out.** `gst_details` holds only what the
+lines cannot say: the rate, the counterparty's GSTIN, the place of supply.
+Taxable value and tax are summed from the voucher's own lines, so a correction
+reports itself with nothing to re-run and the return can never disagree with
+the Duties & Taxes ledgers. The GSTIN and place of supply *are* stored,
+precisely because they are a snapshot — a return filed for August has to keep
+saying what it said then, even after the customer moves state or registers.
+
+> **Known limit: one rate per voucher.** GST is worked out at a single rate for
+> the whole voucher. If its taxable lines carry different rates you are told,
+> and offered the highest; split the invoice if that is wrong. Mixed-rate
+> invoices need tax per line, which needs line-level GST records.
+
+> **This is not a filing tool.** It tells you what you owe and lists the
+> supplies behind it. There is no GSTR upload, no e-invoicing, no reverse
+> charge, and no composition scheme.
+
 ## Voiding a voucher, and deleting one
 
 Two different things, and the difference is the voucher **number**.
