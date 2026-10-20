@@ -450,3 +450,168 @@ def balance_sheet(as_at=None) -> dict:
             "net_profit": profit,
         },
     }
+
+
+# --------------------------------------------------------------------------- #
+# bill-wise receivables and payables
+# --------------------------------------------------------------------------- #
+# How long a bill has been outstanding, in days, bucketed. Open-ended at the
+# top: "over 90" is one answer, and splitting it further says little that
+# "very late" does not.
+AGE_BUCKETS = ((0, 30), (31, 60), (61, 90), (91, None))
+AGE_BY = ("due date", "bill date")
+
+
+def age_bucket(days: int) -> str:
+    """The label a number of days falls in. Anything not yet due is 'Not due'."""
+    if days < 0:
+        return "Not due"
+    for low, high in AGE_BUCKETS:
+        if high is None or days <= high:
+            return f"{low}-{high} days" if high else f"Over {low - 1} days"
+    return "Not due"
+
+
+def bucket_labels() -> list[str]:
+    return ["Not due"] + [age_bucket(low) for low, _ in AGE_BUCKETS]
+
+
+def outstanding(as_at=None, age_by: str = "due date",
+                ledger: int | None = None) -> dict:
+    """Open bills per party, with how overdue each one is.
+
+    A bill is the pair (party, reference) and its balance is the SUM of its
+    allocations - there is no stored bill amount. So a reference settled in
+    full sums to zero and simply stops appearing, with no status to update
+    and nothing to go stale.
+
+    `age_by` decides what the clock runs from: the due date, which answers
+    "how late is this?", or the bill's own date, which answers "how long have
+    we been carrying it?". Bills with no due date always age from their own
+    date, so choosing due date never silently drops them.
+    """
+    if age_by not in AGE_BY:
+        raise ValueError(f"Age bills by {' or '.join(AGE_BY)}, not {age_by!r}.")
+    today = date.today() if as_at is None else (
+        as_at if isinstance(as_at, date) else date.fromisoformat(str(as_at)))
+
+    frame = db.get_allocations(as_at=as_at)
+    # `Pending` is the magnitude, which is what a report shows; `Signed` keeps
+    # the direction, which is what reconciling against the ledger needs. A
+    # party can owe on bills while holding a credit on account, and adding
+    # magnitudes would then double-count instead of netting.
+    columns = ["Party", "Ref", "Date", "Due", "Amount", "Pending", "Signed",
+               "Age", "Bucket", "nature", "ledger_id"]
+    if ledger is not None and not frame.empty:
+        frame = frame[frame["ledger_id"] == int(ledger)]
+    if frame.empty:
+        return {"bills": pd.DataFrame(columns=columns),
+                "on_account": pd.DataFrame(columns=["Party", "Pending",
+                                                    "nature", "ledger_id"]),
+                "ageing": pd.DataFrame(columns=["Bucket", "Receivable",
+                                                "Payable"]),
+                "totals": {"receivable": 0.0, "payable": 0.0,
+                           "on_account": 0.0},
+                "age_by": age_by, "as_at": today}
+
+    # On-account money is not a bill: it is deliberately unattached, so it
+    # has nothing to be overdue against. Carried in the totals, not the list.
+    on_account = frame[frame["kind"] == "on_account"]
+    frame = frame[frame["kind"] != "on_account"]
+
+    rows = []
+    for (lid, ref), group in frame.groupby(["ledger_id", "bill_ref"],
+                                           sort=False):
+        pending = round(float(group["signed"].sum()), 2)
+        if abs(pending) <= EPS:
+            continue                      # settled in full, so not a bill now
+        opened = group[group["kind"].isin(["new", "advance"])]
+        first = (opened if not opened.empty else group).iloc[0]
+        billed = opened["signed"].sum() if not opened.empty else pending
+        bill_date = date.fromisoformat(str(first["voucher_date"]))
+        due_raw = str(first["due_date"] or "")
+        due = date.fromisoformat(due_raw) if due_raw else None
+        # No due date means there is nothing to be late against, so those age
+        # from the bill date whichever basis is chosen.
+        from_date = due if (age_by == "due date" and due) else bill_date
+        rows.append({
+            "Party": first["ledger_name"],
+            "Ref": ref,
+            "Date": bill_date.isoformat(),
+            "Due": due.isoformat() if due else "",
+            "Amount": round(abs(float(billed)), 2),
+            "Pending": round(abs(pending), 2),
+            "Signed": pending,
+            "Age": (today - from_date).days,
+            "Bucket": age_bucket((today - from_date).days),
+            "nature": first["nature"],
+            "ledger_id": int(lid),
+        })
+
+    bills = pd.DataFrame(rows, columns=columns)
+    if not bills.empty:
+        bills = bills.sort_values(["Age", "Party", "Ref"],
+                                 ascending=[False, True, True]) \
+                     .reset_index(drop=True)
+
+    # An asset-natured party owes us; a liability-natured one is owed. Taken
+    # from the group's nature rather than the sign, so a customer in credit
+    # still reports under receivables, where you would look for them.
+    def side(frame_in, nature):
+        part = frame_in[frame_in["nature"] == nature]
+        return round(float(part["Pending"].sum()), 2) if not part.empty else 0.0
+
+    ageing = []
+    for label in bucket_labels():
+        part = bills[bills["Bucket"] == label] if not bills.empty else bills
+        ageing.append({"Bucket": label,
+                       "Receivable": side(part, "asset") if not part.empty else 0.0,
+                       "Payable": side(part, "liability") if not part.empty else 0.0})
+    ageing = pd.DataFrame(ageing, columns=["Bucket", "Receivable", "Payable"])
+    ageing = ageing[(ageing["Receivable"].abs() > EPS)
+                    | (ageing["Payable"].abs() > EPS)].reset_index(drop=True)
+
+    # On-account money, per party. Reported beside the bills rather than
+    # folded into them: it is real money on the account that simply is not
+    # against anything, and a party's ledger balance only reconciles once it
+    # is counted. Seeing it is also the prompt to go and allocate it.
+    unattached = 0.0
+    loose_columns = ["Party", "Pending", "nature", "ledger_id"]
+    loose = pd.DataFrame(columns=loose_columns)
+    if not on_account.empty:
+        unattached = round(float(on_account["signed"].sum()), 2)
+        grouped = on_account.groupby(["ledger_id", "ledger_name", "nature"],
+                                     as_index=False)["signed"].sum()
+        grouped = grouped[grouped["signed"].abs() > EPS]
+        loose = pd.DataFrame({
+            "Party": grouped["ledger_name"],
+            "Pending": grouped["signed"].round(2),
+            "nature": grouped["nature"],
+            "ledger_id": grouped["ledger_id"].astype(int),
+        }, columns=loose_columns).reset_index(drop=True)
+
+    return {
+        "bills": bills,
+        "on_account": loose,
+        "ageing": ageing,
+        "totals": {
+            "receivable": side(bills, "asset") if not bills.empty else 0.0,
+            "payable": side(bills, "liability") if not bills.empty else 0.0,
+            "on_account": unattached,
+        },
+        "age_by": age_by,
+        "as_at": today,
+    }
+
+
+def open_bills(ledger: int, as_at=None) -> pd.DataFrame:
+    """That party's unsettled bills - what the allocation picker offers.
+
+    Oldest first, because that is the order they are usually settled in and
+    the order "apply to the oldest" needs.
+    """
+    result = outstanding(as_at=as_at, ledger=int(ledger))
+    bills = result["bills"]
+    if bills.empty:
+        return bills
+    return bills.sort_values("Date").reset_index(drop=True)

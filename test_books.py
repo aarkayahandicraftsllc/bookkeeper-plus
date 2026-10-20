@@ -254,7 +254,8 @@ def warn(vtype, *lines):
 check("a payment that credits bank is fine",
       warn("Payment", ("Rent", 100, 0), ("Bank of India", 0, 100)), [])
 check("a payment crediting nothing liquid is flagged",
-      len(warn("Payment", ("Rent", 100, 0), ("Acme Traders", 0, 100))), 1)
+      any("cash or bank" in n for n in
+          warn("Payment", ("Rent", 100, 0), ("Acme Traders", 0, 100))), True)
 check("a receipt debiting bank is fine",
       warn("Receipt", ("Bank of India", 100, 0), ("Sales", 0, 100)), [])
 check("a contra between bank and cash is fine",
@@ -263,8 +264,14 @@ check("a contra touching a non-cash ledger is flagged",
       len(warn("Contra", ("Rent", 100, 0), ("Bank of India", 0, 100))), 1)
 check("a journal touching bank is flagged",
       len(warn("Journal", ("Rent", 100, 0), ("Bank of India", 0, 100))), 1)
-check("a journal between two nominal ledgers is fine",
-      warn("Journal", ("Rent", 100, 0), ("Acme Traders", 0, 100)), [])
+check("a journal that touches neither cash nor bank draws no such warning",
+      any("cash" in n or "bank" in n for n in
+          warn("Journal", ("Rent", 100, 0), ("Acme Traders", 0, 100))), False)
+# Acme Traders is a party, so the SAME voucher is flagged for a different
+# reason: 100 landing on their account against no bill.
+check("though a party line with no bill reference is flagged on its own",
+      any("not against any bill" in n for n in
+          warn("Journal", ("Rent", 100, 0), ("Acme Traders", 0, 100))), True)
 
 print("\n14) Opening balances that disagree are shown, not hidden")
 db.add_ledger("Odd Asset", "Fixed Assets", 9_000, "Dr")
@@ -745,6 +752,256 @@ check("and every existing voucher is live, not voided",
 check("init_db can be run again safely", db.init_db(), None)
 db.use_company(kept)
 legacy.unlink(missing_ok=True)
+
+print("\n21) Bill-wise receivables and payables")
+from datetime import timedelta as _td
+
+check("a debtor keeps bills by default",
+      db.defaults_to_bill_wise("Sundry Debtors"), True)
+check("so does a creditor",
+      db.defaults_to_bill_wise("Sundry Creditors"), True)
+check("a bank account does not", db.defaults_to_bill_wise("Bank Accounts"), False)
+db.add_group("Export Customers", "Sundry Debtors")
+check("and so does a SUB-group of a party group, not only the group itself",
+      db.defaults_to_bill_wise("Export Customers"), True)
+
+db.add_ledger("Acme Ltd", "Sundry Debtors")
+db.add_ledger("Supplier Co", "Sundry Creditors")
+check("a new ledger under a party group comes out bill-wise",
+      bool(db.get_ledgers().set_index("name").loc["Acme Ltd", "bill_wise"]), True)
+check("but Cash does not",
+      bool(db.get_ledgers().set_index("name").loc["Cash", "bill_wise"]), False)
+
+TODAY = date.today()
+
+
+def invoice(ref, amount, days_ago, credit_days):
+    when = TODAY - _td(days=days_ago)
+    return db.save_voucher(
+        voucher_type="Sales", voucher_date=when, narration=ref,
+        lines=[{"ledger_id": db.ledger_id("Acme Ltd"), "debit": amount,
+                "credit": 0,
+                "bills": [{"kind": "new", "bill_ref": ref, "signed": amount,
+                           "due_date": (when + _td(days=credit_days)).isoformat()}]},
+               {"ledger_id": db.ledger_id("Sales"), "debit": 0,
+                "credit": amount}])
+
+
+sales_before = len(db.get_vouchers(voucher_type="Sales"))
+loose_before = acc.outstanding()["totals"]["on_account"]
+gap_before = acc.trial_balance()["difference"]
+
+
+def refused(what, **kwargs):
+    """Save must be rejected AND write nothing. Returns the message."""
+    try:
+        db.save_voucher(**kwargs)
+        check(what, "allowed", "refused")
+        return ""
+    except ValueError as exc:
+        check(what, "refused", "refused")
+        return str(exc)
+
+
+# --- the hard rule: a bill-wise line must be fully allocated ------------- #
+# Unallocated money is ALLOWED - demanding otherwise would be a bookkeeping
+# practice enforced as arithmetic, and it broke every voucher already posted
+# to a party. The remainder is materialised as an explicit on-account
+# allocation, so nothing is unaccounted for and the editor can show it.
+loose = db.save_voucher(
+    voucher_type="Sales", voucher_date=TODAY, narration="no refs",
+    lines=[{"ledger_id": db.ledger_id("Acme Ltd"), "debit": 1000, "credit": 0},
+           {"ledger_id": db.ledger_id("Sales"), "debit": 0, "credit": 1000}])
+kept = db.get_voucher(loose)[1][0]["bills"]
+check("a bill-wise line with nothing allocated still saves", len(kept), 1)
+check("with the whole amount explicitly ON ACCOUNT", kept[0]["kind"],
+      "on_account")
+check("and it warns rather than refusing",
+      any("not against any bill" in n for n in db.voucher_type_warnings(
+          "Sales",
+          [{"ledger_id": db.ledger_id("Acme Ltd"), "debit": 1000, "credit": 0}],
+          db.get_ledgers())), True)
+
+part = db.save_voucher(
+    voucher_type="Sales", voucher_date=TODAY, narration="short",
+    lines=[{"ledger_id": db.ledger_id("Acme Ltd"), "debit": 1000, "credit": 0,
+            "bills": [{"kind": "new", "bill_ref": "PART", "signed": 600}]},
+           {"ledger_id": db.ledger_id("Sales"), "debit": 0, "credit": 1000}])
+kept = db.get_voucher(part)[1][0]["bills"]
+check("allocating LESS than the line saves too", len(kept), 2)
+check("the named bill keeping its own amount",
+      float(kept[0]["signed"]), 600.0)
+check("and the shortfall landing on account", float(kept[1]["signed"]), 400.0)
+db.delete_voucher(loose)
+db.delete_voucher(part)
+
+msg = refused(
+    "allocating MORE than the line is refused",
+    voucher_type="Sales", voucher_date=TODAY, narration="over",
+    lines=[{"ledger_id": db.ledger_id("Acme Ltd"), "debit": 1000, "credit": 0,
+            "bills": [{"kind": "new", "bill_ref": "OVER", "signed": 1400}]},
+           {"ledger_id": db.ledger_id("Sales"), "debit": 0, "credit": 1000}])
+check("saying by how much", "400.00 more than" in msg, True)
+
+msg = refused(
+    "an allocation running the opposite way to its line is refused",
+    voucher_type="Sales", voucher_date=TODAY, narration="backwards",
+    lines=[{"ledger_id": db.ledger_id("Acme Ltd"), "debit": 1000, "credit": 0,
+            "bills": [{"kind": "new", "bill_ref": "BACK", "signed": -1000}]},
+           {"ledger_id": db.ledger_id("Sales"), "debit": 0, "credit": 1000}])
+check("because a receipt must never increase what is owed",
+      "opposite way" in msg, True)
+
+msg = refused(
+    "a bill reference on a ledger that does not keep bills is refused",
+    voucher_type="Receipt", voucher_date=TODAY, narration="stray ref",
+    lines=[{"ledger_id": db.ledger_id("Cash"), "debit": 500, "credit": 0,
+            "bills": [{"kind": "new", "bill_ref": "NOPE", "signed": 500}]},
+           {"ledger_id": db.ledger_id("Sales"), "debit": 0, "credit": 500}])
+check("so a reference cannot sit unseen on a cash line",
+      "does not keep bills" in msg, True)
+
+msg = refused(
+    "an allocation with no reference is refused",
+    voucher_type="Sales", voucher_date=TODAY, narration="nameless",
+    lines=[{"ledger_id": db.ledger_id("Acme Ltd"), "debit": 900, "credit": 0,
+            "bills": [{"kind": "new", "bill_ref": "", "signed": 900}]},
+           {"ledger_id": db.ledger_id("Sales"), "debit": 0, "credit": 900}])
+check("since it could never be settled afterwards",
+      "needs a bill reference" in msg, True)
+check("and not one of those refusals wrote a voucher",
+      len(db.get_vouchers(voucher_type="Sales")), sales_before)
+
+# --- now a real set of bills -------------------------------------------- #
+invoice("INV-1", 100_000, 100, 30)        # long overdue
+invoice("INV-2", 50_000, 45, 30)          # overdue
+invoice("INV-3", 25_000, 10, 60)          # not due yet
+db.save_voucher(
+    voucher_type="Receipt", voucher_date=TODAY, narration="cheque",
+    lines=[{"ledger_id": db.ledger_id("Cash"), "debit": 90_000, "credit": 0},
+           {"ledger_id": db.ledger_id("Acme Ltd"), "debit": 0, "credit": 90_000,
+            "bills": [{"kind": "against", "bill_ref": "INV-1", "signed": -40_000},
+                      {"kind": "against", "bill_ref": "INV-2", "signed": -50_000}]}])
+when = TODAY - _td(days=70)
+db.save_voucher(
+    voucher_type="Purchase", voucher_date=when, narration="BILL-9",
+    lines=[{"ledger_id": db.ledger_id("Purchases"), "debit": 30_000, "credit": 0},
+           {"ledger_id": db.ledger_id("Supplier Co"), "debit": 0,
+            "credit": 30_000,
+            "bills": [{"kind": "new", "bill_ref": "BILL-9", "signed": -30_000,
+                       "due_date": (when + _td(days=15)).isoformat()}]}])
+
+out = acc.outstanding()
+by_ref = out["bills"].set_index("Ref")
+check("a part-paid bill shows what is LEFT, not what it was",
+      float(by_ref.loc["INV-1", "Pending"]), 60_000.0)
+check("while still reporting the amount it was raised for",
+      float(by_ref.loc["INV-1", "Amount"]), 100_000.0)
+check("a bill settled in full stops being a bill",
+      "INV-2" in by_ref.index, False)
+check("receivables total", out["totals"]["receivable"], 85_000.0)
+check("payables total", out["totals"]["payable"], 30_000.0)
+
+# THE check that makes bill-wise trustworthy. If these ever disagree the
+# bills are fiction: a party would owe one amount on the balance sheet and a
+# different amount on the outstanding report.
+def reconciles(party, result=None):
+    """A party's ledger balance, less their bills and on-account money.
+
+    Must be exactly zero. If it is not, the bills are fiction: the party
+    would owe one amount on the balance sheet and another on the outstanding
+    report, and nobody could tell which was right.
+    """
+    result = result or acc.outstanding()
+    balance = float(acc.balances().set_index("ledger").loc[party, "closing"])
+    pending = float(result["bills"].query("Party == @party")["Signed"].sum())
+    loose = float(result["on_account"].query("Party == @party")["Pending"].sum())
+    return round(balance - pending - loose, 2)
+
+
+for party in ("Acme Ltd", "Supplier Co"):
+    check(f"{party}: bills and on-account money reconcile to the ledger",
+          reconciles(party, out), 0.0, tol=0.0)
+
+# --- ageing, on both bases ---------------------------------------------- #
+check("a bill not yet due is not overdue at all",
+      str(by_ref.loc["INV-3", "Bucket"]), "Not due")
+check("and its age is negative, being days still to run",
+      int(by_ref.loc["INV-3", "Age"]) < 0, True)
+check("aged by due date, INV-1 is 70 days late",
+      int(by_ref.loc["INV-1", "Age"]), 70)
+older = acc.outstanding(age_by="bill date")["bills"].set_index("Ref")
+check("aged by bill date it is 100 days old instead",
+      int(older.loc["INV-1", "Age"]), 100)
+check("which puts it in a different bucket",
+      str(older.loc["INV-1", "Bucket"]), "Over 90 days")
+check("and INV-3 is merely recent rather than 'not due'",
+      str(older.loc["INV-3", "Bucket"]), "0-30 days")
+check("the basis changes how bills are GROUPED, never what is owed",
+      acc.outstanding(age_by="bill date")["totals"]["receivable"],
+      out["totals"]["receivable"], tol=0.0)
+try:
+    acc.outstanding(age_by="whenever")
+    check("an unknown ageing basis is refused", "allowed", "refused")
+except ValueError:
+    check("an unknown ageing basis is refused", "refused", "refused")
+
+check("the ageing summary adds up to the receivables total",
+      round(float(out["ageing"]["Receivable"].sum()), 2),
+      out["totals"]["receivable"], tol=0.0)
+check("and to the payables total",
+      round(float(out["ageing"]["Payable"].sum()), 2),
+      out["totals"]["payable"], tol=0.0)
+
+# --- a bill on a voided voucher is not money anyone owes ----------------- #
+vid = int(db.get_vouchers(voucher_type="Sales")["id"].max())
+ref_voided = db.get_voucher(vid)[1][0]["bills"][0]["bill_ref"]
+db.void_voucher(vid)
+check("voiding an invoice takes its bill off the outstanding report",
+      ref_voided in set(acc.outstanding()["bills"]["Ref"]), False)
+check("and the party still reconciles to the ledger",
+      reconciles("Acme Ltd"), 0.0, tol=0.0)
+db.restore_voucher(vid)
+check("restoring brings the bill back",
+      ref_voided in set(acc.outstanding()["bills"]["Ref"]), True)
+
+# --- allocations survive a round trip through the editor ----------------- #
+receipt = int(db.get_vouchers(voucher_type="Receipt")["id"].max())
+head, lines = db.get_voucher(receipt)
+party_line = next(line for line in lines if line["bills"])
+check("a saved voucher reads its allocations back", len(party_line["bills"]), 2)
+check("under the same key save_voucher takes",
+      sorted(b["bill_ref"] for b in party_line["bills"]), ["INV-1", "INV-2"])
+db.save_voucher(voucher_id=receipt, voucher_type=head["voucher_type"],
+                voucher_date=head["voucher_date"],
+                narration="cheque (re-saved)", lines=lines)
+check("and re-saving it unchanged leaves the bills exactly as they were",
+      float(acc.outstanding()["bills"].set_index("Ref").loc["INV-1", "Pending"]),
+      60_000.0)
+check("with no duplicate allocations left behind",
+      len(db.get_voucher(receipt)[1][1]["bills"]), 2)
+
+# --- money on account is not a bill ------------------------------------- #
+db.save_voucher(
+    voucher_type="Receipt", voucher_date=TODAY, narration="unidentified",
+    lines=[{"ledger_id": db.ledger_id("Cash"), "debit": 5_000, "credit": 0},
+           {"ledger_id": db.ledger_id("Acme Ltd"), "debit": 0, "credit": 5_000,
+            "bills": [{"kind": "on_account", "bill_ref": "", "signed": -5_000}]}])
+after = acc.outstanding()
+check("on-account money raises no bill", len(after["bills"]), len(out["bills"]))
+check("but it is reported rather than lost",
+      round(after["totals"]["on_account"] - loose_before, 2), -5_000.0)
+check("and the party reconciles with it included",
+      reconciles("Acme Ltd", after), 0.0, tol=0.0)
+check("and the trial balance is untouched by any of this",
+      acc.trial_balance()["difference"], gap_before, tol=0.0)
+
+# --- the picker's view -------------------------------------------------- #
+picker = acc.open_bills(db.ledger_id("Acme Ltd"))
+check("the picker offers only that party's bills",
+      set(picker["Party"]), {"Acme Ltd"})
+check("oldest first, the order they are usually settled in",
+      list(picker["Date"]), sorted(picker["Date"]))
 
 print("\n" + ("ALL CHECKS PASSED" if not FAILURES else f"FAILURES: {FAILURES}"))
 raise SystemExit(1 if FAILURES else 0)

@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS ledgers (
     opening_side TEXT    NOT NULL DEFAULT 'Dr' CHECK (opening_side IN ('Dr', 'Cr')),
     notes        TEXT    NOT NULL DEFAULT '',
     is_reserved  INTEGER NOT NULL DEFAULT 0,
-    active       INTEGER NOT NULL DEFAULT 1
+    active       INTEGER NOT NULL DEFAULT 1,
+    bill_wise    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS vouchers (
@@ -137,6 +138,38 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Bill-wise receivables and payables.
+--
+-- A bill is NOT a row of its own: it is the pair (ledger_id, bill_ref), and
+-- what is outstanding on it is DERIVED by summing these allocations, exactly
+-- as a ledger balance is derived from voucher lines. There is therefore no
+-- stored bill amount that can drift out of step with the vouchers.
+--
+-- `signed` follows the project's debit-positive convention, so the sum over a
+-- reference IS its outstanding: a sales invoice debits the customer (+), a
+-- receipt credits them (-), and a settled bill sums to zero.
+--
+-- ledger_id is carried here as well as on the line. It cannot drift, because
+-- editing a voucher deletes and re-inserts its lines and these cascade with
+-- them - and it keeps every outstanding query off a join.
+CREATE TABLE IF NOT EXISTS bill_allocations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    line_id     INTEGER NOT NULL REFERENCES voucher_lines(id) ON DELETE CASCADE,
+    ledger_id   INTEGER NOT NULL REFERENCES ledgers(id),
+    bill_ref    TEXT    NOT NULL DEFAULT '',
+    kind        TEXT    NOT NULL
+                CHECK (kind IN ('new', 'against', 'advance', 'on_account')),
+    signed      REAL    NOT NULL,
+    due_date    TEXT    NOT NULL DEFAULT '',
+    alloc_order INTEGER NOT NULL DEFAULT 0,
+    -- Only an on-account allocation may be nameless; everything else has to
+    -- be findable by reference or it can never be settled.
+    CHECK (kind = 'on_account' OR bill_ref <> '')
+);
+
+CREATE INDEX IF NOT EXISTS idx_alloc_line ON bill_allocations(line_id);
+CREATE INDEX IF NOT EXISTS idx_alloc_bill ON bill_allocations(ledger_id, bill_ref);
 
 CREATE INDEX IF NOT EXISTS idx_lines_voucher ON voucher_lines(voucher_id);
 CREATE INDEX IF NOT EXISTS idx_lines_ledger ON voucher_lines(ledger_id);
@@ -708,6 +741,29 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE vouchers ADD COLUMN voided_at TEXT NOT NULL"
                      " DEFAULT ''")
 
+    ledger_columns = {row["name"] for row in
+                      conn.execute("PRAGMA table_info(ledgers)").fetchall()}
+    if "bill_wise" not in ledger_columns:
+        conn.execute("ALTER TABLE ledgers ADD COLUMN bill_wise INTEGER NOT"
+                     " NULL DEFAULT 0")
+        # Switched on for the parties it is actually for, ONCE, at the moment
+        # the column appears - never on later runs. Doing it every time
+        # init_db ran would silently undo a ledger the user had turned off.
+        # Sub-groups count, so this walks down from the two reserved groups
+        # rather than matching a name.
+        conn.execute(
+            """
+            UPDATE ledgers SET bill_wise = 1 WHERE group_id IN (
+                WITH RECURSIVE under(id) AS (
+                    SELECT id FROM groups
+                     WHERE name IN ('Sundry Debtors', 'Sundry Creditors')
+                    UNION ALL
+                    SELECT g.id FROM groups g JOIN under u ON g.parent_id = u.id
+                )
+                SELECT id FROM under
+            )
+            """)
+
 
 def init_db() -> None:
     """Create the schema and the reserved masters. Safe to call repeatedly."""
@@ -894,8 +950,24 @@ def ledger_id(name: str) -> int:
     return int(row["id"])
 
 
+BILL_WISE_GROUPS = ("Sundry Debtors", "Sundry Creditors")
+
+
+def defaults_to_bill_wise(group: str) -> bool:
+    """Whether a ledger under this group should keep bills by default.
+
+    The two party groups, and anything the user has put beneath them. Asked
+    of the GROUP rather than hardcoded per ledger, so a new customer comes
+    out bill-wise without anyone remembering to tick a box.
+    """
+    lineage = group_lineage()
+    gid = group_id(group)
+    return any(name in BILL_WISE_GROUPS for name in lineage.get(gid, []))
+
+
 def add_ledger(name: str, group: str, opening: float = 0.0,
-               opening_side: str = "Dr", notes: str = "") -> int:
+               opening_side: str = "Dr", notes: str = "",
+               bill_wise: bool | None = None) -> int:
     name = name.strip()
     if not name:
         raise ValueError("A ledger needs a name.")
@@ -905,30 +977,43 @@ def add_ledger(name: str, group: str, opening: float = 0.0,
         raise ValueError("Enter the opening balance as a positive amount and "
                          "choose Dr or Cr.")
     gid = group_id(group)
+    if bill_wise is None:
+        bill_wise = defaults_to_bill_wise(group)
     with connect() as conn:
         if conn.execute("SELECT COUNT(*) FROM ledgers WHERE name = ?",
                         (name,)).fetchone()[0]:
             raise ValueError(f"There is already a ledger called {name!r}.")
         cur = conn.execute(
-            "INSERT INTO ledgers (name, group_id, opening, opening_side, notes)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (name, gid, round(float(opening), 2), opening_side, notes.strip()),
+            "INSERT INTO ledgers (name, group_id, opening, opening_side, notes,"
+            " bill_wise) VALUES (?, ?, ?, ?, ?, ?)",
+            (name, gid, round(float(opening), 2), opening_side, notes.strip(),
+             1 if bill_wise else 0),
         )
         return int(cur.lastrowid)
 
 
 def update_ledger(ledger: int, name: str, group: str, opening: float,
-                  opening_side: str, notes: str = "", active: bool = True) -> None:
+                  opening_side: str, notes: str = "", active: bool = True,
+                  bill_wise: bool | None = None) -> None:
     if opening_side not in SIDES:
         raise ValueError("Opening side must be 'Dr' or 'Cr'.")
     if float(opening) < 0:
         raise ValueError("Enter the opening balance as a positive amount.")
     with connect() as conn:
+        if bill_wise is None:
+            # Left as it is when the caller does not say. Defaulting from the
+            # group here would re-tick a ledger the user had turned off every
+            # time anything else about it was edited.
+            row = conn.execute("SELECT bill_wise FROM ledgers WHERE id = ?",
+                               (int(ledger),)).fetchone()
+            bill_wise = bool(row and row["bill_wise"])
         conn.execute(
             "UPDATE ledgers SET name = ?, group_id = ?, opening = ?,"
-            " opening_side = ?, notes = ?, active = ? WHERE id = ?",
+            " opening_side = ?, notes = ?, active = ?, bill_wise = ?"
+            " WHERE id = ?",
             (name.strip(), group_id(group), round(float(opening), 2), opening_side,
-             notes.strip(), 1 if active else 0, int(ledger)),
+             notes.strip(), 1 if active else 0, 1 if bill_wise else 0,
+             int(ledger)),
         )
 
 
@@ -984,7 +1069,8 @@ def _validate_lines(lines: list[dict], ledgers: pd.DataFrame) -> list[dict]:
         if not debit and not credit:
             raise ValueError("Every line needs an amount.")
         cleaned.append({"ledger_id": lid, "debit": debit, "credit": credit,
-                        "line_order": order})
+                        "line_order": order,
+                        "bills": line.get("bills") or []})
 
     if len(cleaned) < 2:
         raise ValueError("A voucher needs at least two lines.")
@@ -997,7 +1083,88 @@ def _validate_lines(lines: list[dict], ledgers: pd.DataFrame) -> list[dict]:
             f"Debit {debits:,.2f} and credit {credits:,.2f} must agree — "
             f"the difference is {abs(debits - credits):,.2f}."
         )
+    _validate_bills(cleaned, ledgers)
     return cleaned
+
+
+ALLOCATION_KINDS = ("new", "against", "advance", "on_account")
+
+
+def _validate_bills(cleaned: list[dict], ledgers: pd.DataFrame) -> None:
+    """Check the bill allocations on every bill-wise line, and complete them.
+
+    What is REFUSED is only what is arithmetically wrong: allocating more
+    than the line holds, or allocating the opposite way to it. Allocating
+    LESS is allowed, and the remainder becomes an explicit `on_account`
+    allocation.
+
+    That split follows the rule this project already uses - a voucher must
+    balance because the arithmetic demands it, while the cash/bank
+    conventions only warn because real books need exceptions. Demanding full
+    allocation would have been a third thing: a bookkeeping PRACTICE enforced
+    as arithmetic. It also instantly broke every voucher already posted to a
+    party ledger, including simply re-saving one, which is how it was found.
+
+    The remainder is MATERIALISED rather than left implicit, so the database
+    says what it means: this money is on this party's account and attached to
+    no bill. It also keeps the reconciliation simple - a party's ledger
+    balance is the sum of their pending bills PLUS their on-account money,
+    with nothing unaccounted for.
+
+    Lines on ledgers that do not keep bills must carry no allocations at all,
+    so a stray reference on a cash line cannot sit in the data unseen.
+    """
+    bill_wise = {}
+    names = {}
+    if not ledgers.empty:
+        for row in ledgers.itertuples():
+            bill_wise[int(row.id)] = bool(getattr(row, "bill_wise", 0))
+            names[int(row.id)] = row.name
+
+    for line in cleaned:
+        lid = line["ledger_id"]
+        bills = line["bills"]
+        who = names.get(lid, "that ledger")
+        if not bill_wise.get(lid):
+            if bills:
+                raise ValueError(
+                    f"{who} does not keep bills, so its line cannot carry "
+                    f"bill references. Turn on bill-wise for the ledger, or "
+                    f"remove them.")
+            continue
+
+        amount = round(line["debit"] - line["credit"], 2)
+        total = 0.0
+        for bill in bills:
+            kind = str(bill.get("kind") or "").strip()
+            if kind not in ALLOCATION_KINDS:
+                raise ValueError(f"{kind!r} is not a kind of bill allocation.")
+            ref = str(bill.get("bill_ref") or "").strip()
+            if kind != "on_account" and not ref:
+                raise ValueError(
+                    f"A {kind} allocation on {who} needs a bill reference, "
+                    f"or it could never be settled later.")
+            signed = round(float(bill.get("signed") or 0), 2)
+            if not signed:
+                raise ValueError(
+                    f"A bill allocation on {who} has no amount.")
+            # Allocating the opposite way to the line would mean a receipt
+            # that increased what was owed.
+            if (signed > 0) != (amount > 0):
+                raise ValueError(
+                    f"A bill allocation on {who} runs the opposite way to "
+                    f"the line it is on.")
+            total = round(total + signed, 2)
+
+        over = abs(total) - abs(amount)
+        if over > 0.005:
+            raise ValueError(
+                f"The bills on {who} come to {abs(total):,.2f}, which is "
+                f"{over:,.2f} more than the {abs(amount):,.2f} on the line.")
+        remainder = round(amount - total, 2)
+        if abs(remainder) > 0.005:
+            bills.append({"kind": "on_account", "bill_ref": "",
+                          "signed": remainder, "due_date": ""})
 
 
 def voucher_type_warnings(voucher_type: str, lines: list[dict],
@@ -1037,6 +1204,27 @@ def voucher_type_warnings(voucher_type: str, lines: list[dict],
     if voucher_type == "Journal" and any_cash:
         notes.append("A journal is for adjustments that touch neither cash nor "
                      "bank. Use Payment, Receipt or Contra for money movements.")
+
+    # Money on a party's account but attached to no bill. Allowed - and saved
+    # as an explicit on-account allocation - but it will not appear on the
+    # outstanding report as anything anyone can chase, so say so now.
+    for line in lines:
+        lid = line.get("ledger_id")
+        if lid is None or lid not in by_id.index:
+            continue
+        if not bool(by_id.loc[lid].get("bill_wise", 0)):
+            continue
+        amount = round(float(line.get("debit") or 0)
+                       - float(line.get("credit") or 0), 2)
+        allocated = round(sum(float(b.get("signed") or 0)
+                              for b in (line.get("bills") or [])
+                              if b.get("kind") != "on_account"), 2)
+        loose = round(amount - allocated, 2)
+        if abs(loose) > 0.005:
+            notes.append(
+                f"{abs(loose):,.2f} on {by_id.loc[lid]['name']} is not "
+                f"against any bill, so it will sit on account rather than on "
+                f"the outstanding report.")
     return notes
 
 
@@ -1073,12 +1261,32 @@ def save_voucher(*, voucher_type: str, voucher_date, narration: str,
             )
             conn.execute("DELETE FROM voucher_lines WHERE voucher_id = ?",
                          (int(voucher_id),))
-        conn.executemany(
-            "INSERT INTO voucher_lines (voucher_id, ledger_id, debit, credit,"
-            " line_order) VALUES (?, ?, ?, ?, ?)",
-            [(voucher_id, l["ledger_id"], l["debit"], l["credit"], l["line_order"])
-             for l in cleaned],
-        )
+        # One at a time rather than executemany, because each line's bill
+        # allocations need its rowid. Deleting the lines above took their old
+        # allocations with them, by cascade.
+        for line in cleaned:
+            cur = conn.execute(
+                "INSERT INTO voucher_lines (voucher_id, ledger_id, debit,"
+                " credit, line_order) VALUES (?, ?, ?, ?, ?)",
+                (voucher_id, line["ledger_id"], line["debit"], line["credit"],
+                 line["line_order"]),
+            )
+            line_id = int(cur.lastrowid)
+            for order, bill in enumerate(line["bills"]):
+                kind = str(bill["kind"]).strip()
+                conn.execute(
+                    "INSERT INTO bill_allocations (line_id, ledger_id,"
+                    " bill_ref, kind, signed, due_date, alloc_order)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (line_id, line["ledger_id"],
+                     str(bill.get("bill_ref") or "").strip(), kind,
+                     round(float(bill["signed"]), 2),
+                     # A due date belongs to the bill, so it is recorded on
+                     # the allocation that OPENS one and nowhere else.
+                     str(bill.get("due_date") or "")
+                     if kind in ("new", "advance") else "",
+                     order),
+                )
     return int(voucher_id)
 
 
@@ -1145,12 +1353,30 @@ def get_voucher(voucher_id: int) -> tuple[dict, list[dict]] | None:
         if head is None:
             return None
         lines = conn.execute(
-            "SELECT vl.ledger_id, vl.debit, vl.credit, l.name AS ledger_name"
+            "SELECT vl.id, vl.ledger_id, vl.debit, vl.credit,"
+            " l.name AS ledger_name, l.bill_wise"
             " FROM voucher_lines vl JOIN ledgers l ON l.id = vl.ledger_id"
             " WHERE vl.voucher_id = ? ORDER BY vl.line_order",
             (int(voucher_id),),
         ).fetchall()
-    return dict(head), [dict(line) for line in lines]
+        allocations = conn.execute(
+            "SELECT line_id, bill_ref, kind, signed, due_date"
+            " FROM bill_allocations WHERE line_id IN ("
+            "   SELECT id FROM voucher_lines WHERE voucher_id = ?)"
+            " ORDER BY line_id, alloc_order",
+            (int(voucher_id),),
+        ).fetchall()
+    by_line: dict[int, list[dict]] = {}
+    for row in allocations:
+        by_line.setdefault(int(row["line_id"]), []).append(dict(row))
+    out = []
+    for line in lines:
+        line = dict(line)
+        # Read back under the same key save_voucher takes, so a voucher can
+        # be loaded, changed and saved again without the caller translating.
+        line["bills"] = by_line.get(int(line["id"]), [])
+        out.append(line)
+    return dict(head), out
 
 
 def delete_voucher(voucher_id: int) -> None:
@@ -1159,6 +1385,36 @@ def delete_voucher(voucher_id: int) -> None:
         conn.execute("DELETE FROM voucher_lines WHERE voucher_id = ?",
                      (int(voucher_id),))
         conn.execute("DELETE FROM vouchers WHERE id = ?", (int(voucher_id),))
+
+
+def get_allocations(as_at=None, include_voided: bool = False) -> pd.DataFrame:
+    """Every bill allocation, with the voucher and party it belongs to.
+
+    Voided vouchers are left out by default for the same reason they are left
+    out of `get_lines`: a voided invoice is not money anyone owes. This is the
+    single place the bill reports read from, so that holds everywhere at once.
+    """
+    sql = (
+        "SELECT ba.id, ba.line_id, ba.ledger_id, ba.bill_ref, ba.kind,"
+        " ba.signed, ba.due_date, ba.alloc_order,"
+        " l.name AS ledger_name, g.name AS group_name, g.nature,"
+        " v.id AS voucher_id, v.voucher_type, v.number, v.voucher_date,"
+        " v.narration, v.voided"
+        " FROM bill_allocations ba"
+        " JOIN voucher_lines vl ON vl.id = ba.line_id"
+        " JOIN vouchers v ON v.id = vl.voucher_id"
+        " JOIN ledgers l ON l.id = ba.ledger_id"
+        " JOIN groups g ON g.id = l.group_id WHERE 1 = 1"
+    )
+    params: list = []
+    if not include_voided:
+        sql += " AND v.voided = 0"
+    if as_at is not None:
+        sql += " AND v.voucher_date <= ?"
+        params.append(str(as_at))
+    sql += " ORDER BY v.voucher_date, v.id, ba.alloc_order"
+    with connect() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
 
 
 def is_voided(voucher_id: int) -> bool:
