@@ -66,6 +66,12 @@ VOUCHER_KEYS = {
 # The copy button says which voucher it would copy, because the answer depends
 # on where you are: the one you are altering, or the last one of the type the
 # form is set to. A button that just said "Copy" would be a guess either way.
+# The way out of a filled form, which means one of two things: a voucher
+# being altered is cancelled, a copy that has not been accepted is discarded.
+# Nothing is written in either case - the button just empties the form.
+CANCEL_EDIT = "Cancel edit"
+DISCARD_COPY = "Discard this copy"
+
 COPY_THIS = "Copy this voucher"
 COPY_LAST = "Copy last {kind}"
 
@@ -1602,7 +1608,11 @@ class VoucherScreen(QtWidgets.QWidget):
         self.copy_button.clicked.connect(self.copy_voucher)
         bottom.addWidget(self.copy_button)
         bottom.addStretch(1)
-        self.cancel_button = QtWidgets.QPushButton("Cancel edit")
+        # Shown while altering a voucher AND after copying one - a copy
+        # fills the form just as fully, and until 2026-10-20 there was no way
+        # out of it but to accept it or empty the lines by hand. The wording
+        # follows which of the two it is.
+        self.cancel_button = QtWidgets.QPushButton(CANCEL_EDIT)
         self.cancel_button.clicked.connect(self.reset)
         self.cancel_button.setVisible(False)
         bottom.addWidget(self.cancel_button)
@@ -1997,6 +2007,7 @@ class VoucherScreen(QtWidgets.QWidget):
         self.editing_voided = False
         self._gst = None
         self.title.setText("Voucher Entry")
+        self.cancel_button.setText(CANCEL_EDIT)
         self.cancel_button.setVisible(False)
         self.delete_button.setVisible(False)
         self.void_button.setVisible(False)
@@ -2080,6 +2091,8 @@ class VoucherScreen(QtWidgets.QWidget):
         self._gst = dict(db.get_gst_details(int(source)) or {})
         self._fill_lines(lines, bills=False)
         self._update_copy_button()
+        self.cancel_button.setText(DISCARD_COPY)
+        self.cancel_button.setVisible(True)
         window = self.window()
         if isinstance(window, QtWidgets.QMainWindow):
             window.statusBar().showMessage(
@@ -2127,6 +2140,7 @@ class VoucherScreen(QtWidgets.QWidget):
             (f"Voided {head['voucher_type']} voucher no. {head['number']}"
              if self.editing_voided else
              f"Altering {head['voucher_type']} voucher no. {head['number']}"))
+        self.cancel_button.setText(CANCEL_EDIT)
         self.cancel_button.setVisible(True)
         self.delete_button.setVisible(True)
         # A voided voucher offers Restore instead of Void, and cannot be

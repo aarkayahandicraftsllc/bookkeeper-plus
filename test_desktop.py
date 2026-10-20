@@ -1558,10 +1558,25 @@ check("and the grid still has exactly one spare line",
 check("nothing is saved until you accept it",
       db.next_voucher_number(kind), next_number)
 
+# There has to be a way OUT of a copy. Until 2026-10-20 the only button was
+# Accept: the form was full and could not be emptied (user: "there is no
+# option to can cel it only thing i can do is accept").
+check("a copy offers a way to discard it", v.cancel_button.isHidden(), False)
+check("worded for a copy, not for an edit",
+      v.cancel_button.text(), desktop.DISCARD_COPY)
+v.cancel_button.click()
+settle()
+check("discarding it empties the form", v.row_values(), [])
+check("and writes nothing", db.next_voucher_number(kind), next_number)
+check("the way out goes away with it", v.cancel_button.isHidden(), True)
+
+v.copy_voucher()
+settle()
 v.accept_voucher()
 settle()
-check("accepting it posts the copy, so the type has one more voucher",
+check("accepting a copy posts it, so the type has one more voucher",
       db.next_voucher_number(kind), next_number + 1)
+made = db.last_voucher_id(kind)
 made = db.last_voucher_id(kind)
 check("and the voucher it was copied FROM is untouched",
       db.get_voucher(source_id)[0]["number"], head["number"])
