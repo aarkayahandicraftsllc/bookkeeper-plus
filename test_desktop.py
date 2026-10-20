@@ -578,7 +578,10 @@ settle()
 co.editors["company_name"].setText("Aarkaya Handicrafts LLC")
 co.editors["pan"].setText("aaapz1234c")          # lower case on purpose
 co.editors["gstin"].setText("09AAAPZ1234C1Z5")
-co.editors["address"].setPlainText("12 Mall Road\nNew Delhi")
+for key, line in zip(db.ADDRESS_LINES,
+                     ("12 Mall Road", "Connaught Place", "")):
+    co.editors[key].setText(line)
+co.editors["city"].setText("New Delhi")
 check("saving valid details succeeds", co.save(), True)
 check("the form shows the upper-cased PAN back",
       co.editors["pan"].text(), "AAAPZ1234C")
@@ -605,14 +608,21 @@ check("refresh_all leaves unsaved company edits alone",
 co.refresh()
 check("Revert reloads what is saved", co.editors["phone"].text(), "")
 
-# The address box is sized in LINES, so it has to grow with the text setting.
+# A box sized in LINES has to grow with the text setting. No company field is
+# multiline now that the address is separate lines, so this runs on a probe row
+# - taken out again, because a row left in would shift every later geometry
+# check on this screen.
+probe = desktop.editor_for(db.CompanyField("probe", "Probe", kind="multiline"))
+co.form.addRow("Probe", probe)
 heights = []
 for key in theme.TEXT_ORDER:
     window.set_text_size(key)
     settle()
-    heights.append(co.editors["address"].minimumHeight())
-check("the address box grows with the text size", heights, sorted(set(heights)))
-print(f"       address box: {' -> '.join(f'{h}px' for h in heights)}")
+    heights.append(probe.minimumHeight())
+check("a multiline box grows with the text size", heights, sorted(set(heights)))
+print(f"       multiline box: {' -> '.join(f'{h}px' for h in heights)}")
+co.form.removeRow(probe)
+settle()
 window.set_text_size(theme.DEFAULT_TEXT)
 settle()
 check("the Company screen is not over-wide",

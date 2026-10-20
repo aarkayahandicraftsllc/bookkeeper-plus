@@ -270,6 +270,11 @@ class CompanyField:
     hint: str = ""
     choices: tuple[str, ...] = ()
     required: bool = False
+    # Streamlit lays the short fields out three to a row, which reads wrongly
+    # for the address lines: stacked they are an address, side by side they are
+    # three unrelated boxes. The Qt form gives every field its own row anyway,
+    # so this changes nothing there.
+    wide: bool = False
 
 
 CURRENCY_SYMBOLS = ("₹", "$", "€", "£", "¥")
@@ -279,10 +284,15 @@ COMPANY_FIELDS: tuple[CompanyField, ...] = (
     CompanyField("mailing_name", "Mailing name",
                  hint="How the name should print on statements. "
                       "Blank uses the company name."),
-    CompanyField("address", "Address", kind="multiline"),
+    CompanyField("address1", "Address line 1", wide=True),
+    CompanyField("address2", "Address line 2", wide=True),
+    CompanyField("address3", "Address line 3", wide=True),
+    CompanyField("city", "City"),
     CompanyField("state", "State"),
-    CompanyField("pincode", "PIN code", hint="Six digits."),
     CompanyField("country", "Country"),
+    CompanyField("pincode", "ZIP / PIN code",
+                 hint="Six digits for an Indian PIN code, "
+                      "or a five-digit ZIP."),
     CompanyField("phone", "Phone"),
     CompanyField("email", "E-mail"),
     CompanyField("pan", "PAN", hint="Ten characters, e.g. AAAPZ1234C."),
@@ -301,12 +311,19 @@ COMPANY_FIELDS: tuple[CompanyField, ...] = (
 # the GSTIN cross-check for no reason the user can see.
 UPPER_FIELDS = ("pan", "gstin", "tan", "cin")
 
+# The street part of the address, in printing order. It was one multi-line box
+# until 2026-10-20; _migrate() moves an old one across.
+ADDRESS_LINES = ("address1", "address2", "address3")
+
 PAN_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
 # 2-digit state code, the holder's PAN, entity number, 'Z', then a check digit.
 GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$")
 TAN_RE = re.compile(r"^[A-Z]{4}[0-9]{5}[A-Z]$")
 CIN_RE = re.compile(r"^[LUu][0-9]{5}[A-Z]{2}[0-9]{4}[A-Z]{3}[0-9]{6}$")
-PINCODE_RE = re.compile(r"^[0-9]{6}$")
+# An Indian PIN code is six digits; a US ZIP is five, or five plus four. The
+# field is labelled for both, so it has to accept both - a book kept in one
+# country should not reject the other country's postcode as malformed.
+PINCODE_RE = re.compile(r"^(?:[0-9]{6}|[0-9]{5}(?:-[0-9]{4})?)$")
 
 
 def get_company() -> dict[str, str]:
@@ -344,7 +361,8 @@ def validate_company(values: dict[str, str]) -> dict[str, str]:
          "two-digit state code, a PAN, entity number, Z, check digit"),
         ("tan", TAN_RE, "TAN", "four letters, five digits, one letter"),
         ("cin", CIN_RE, "CIN", "21 characters, starting L or U"),
-        ("pincode", PINCODE_RE, "PIN code", "six digits"),
+        ("pincode", PINCODE_RE, "ZIP / PIN code",
+         "six digits for a PIN code, five for a ZIP"),
     ):
         if cleaned[key] and not pattern.match(cleaned[key]):
             raise ValueError(
@@ -755,13 +773,50 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _split_address(text: str) -> list[str]:
+    """An old multi-line address as up to three separate lines.
+
+    Anything past the third line is folded INTO the third rather than dropped:
+    the lines are a presentation choice, but the text is the user's.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines()]
+    lines = [line for line in lines if line]
+    if len(lines) > len(ADDRESS_LINES):
+        keep = len(ADDRESS_LINES) - 1
+        lines = lines[:keep] + [", ".join(lines[keep:])]
+    return lines
+
+
 def _migrate(conn) -> None:
-    """Add columns that later versions introduced.
+    """Add columns and move settings that later versions introduced.
 
     `CREATE TABLE IF NOT EXISTS` leaves an existing table exactly as it was,
     so books created before a column existed need it added in place. Each
     step must be safe to run on a database that already has it.
     """
+    # The address was one multi-line box until 2026-10-20 and is now separate
+    # lines. A settings key dropped out of COMPANY_FIELDS is still IN the file,
+    # it just stops being read - so an address typed into the old box would
+    # quietly vanish from the screen while sitting in the database. Move it.
+    stored = {row["key"]: row["value"] for row in
+              conn.execute("SELECT key, value FROM settings").fetchall()}
+    if "address" in stored:
+        for key, value in zip(ADDRESS_LINES, _split_address(stored["address"])):
+            if stored.get(key, "").strip():
+                continue                # already filled in; leave it alone
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value))
+        # Kept, not deleted: the original wording is the only record of how the
+        # user had laid the address out, and keeping it is also what makes this
+        # step run exactly once.
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('address_legacy', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (stored["address"],))
+        conn.execute("DELETE FROM settings WHERE key = 'address'")
+
     columns = {row["name"] for row in
                conn.execute("PRAGMA table_info(vouchers)").fetchall()}
     if "voided" not in columns:

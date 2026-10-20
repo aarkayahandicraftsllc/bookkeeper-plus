@@ -181,6 +181,11 @@ def editor_for(field) -> QtWidgets.QWidget:
 
     Shared by the Company screen and the create-company dialog, so the two
     present the same field the same way.
+
+    No company field is ``multiline`` any more - the address became separate
+    lines - but the kind is kept, since it is part of the CompanyField
+    contract and the line-sizing it needs is a trap worth not relearning.
+    `test_desktop.py` exercises it directly.
     """
     if field.kind == "multiline":
         editor = QtWidgets.QPlainTextEdit()
@@ -3080,7 +3085,7 @@ class MastersScreen(QtWidgets.QWidget):
 # --------------------------------------------------------------------------- #
 # Only the fields needed to open a usable set of books. The rest - address,
 # PAN, GSTIN - are filled in afterwards on the Company screen, so creating a
-# company is not a fifteen-field form before you can enter a single voucher.
+# company is not an eighteen-field form before you can enter a single voucher.
 NEW_COMPANY_FIELDS = ("company_name", "fy_start_month", "books_begin",
                       "currency")
 
@@ -3288,7 +3293,7 @@ class CompanyScreen(QtWidgets.QWidget):
             "or CIN that IS filled in has to be the right shape, because a "
             "malformed one is worse than an absent one."))))
 
-        # Fifteen rows at the largest text size is taller than the window, so
+        # Eighteen rows at the largest text size is taller than the window, so
         # the form scrolls instead of having its last fields cut off.
         host = QtWidgets.QWidget()
         self.form = QtWidgets.QFormLayout(host)

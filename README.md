@@ -184,7 +184,7 @@ A few details worth knowing:
 
 * Creating a company asks only for **name, financial year, books-begin date and
   currency** — enough to enter a voucher. Address, PAN and GSTIN are filled in
-  afterwards on the Company screen, rather than facing you with fifteen fields
+  afterwards on the Company screen, rather than facing you with eighteen fields
   before you can do anything.
 * **Two companies may share a name**; the second file gets a `-2` suffix.
 * **Switching closes and reopens the window** rather than rebuilding eight
@@ -283,14 +283,22 @@ folder. Nothing in the app does that for you.
 
 ## Company details
 
-**Ctrl+8**, or Masters → Company in the browser version. Fifteen fields:
+**Ctrl+8**, or Masters → Company in the browser version. Eighteen fields:
 
 | | |
 | --- | --- |
 | Identity | Company name (required), Mailing name |
-| Address | Address, State, PIN code, Country, Phone, E-mail |
+| Address | Address line 1, 2 and 3, City, State, Country, ZIP / PIN code |
+| Contact | Phone, E-mail |
 | Registrations | PAN, GSTIN, TAN, CIN |
 | Books | Financial year begins, Books begin on, Currency symbol |
+
+The address is **separate lines**, not one box, so it can be printed and
+addressed field by field. It *was* one multi-line box: books written before
+2026-10-20 have their old address split across the lines when they are next
+opened, and the original text kept under `address_legacy` in case the split
+read wrongly. **ZIP / PIN code** takes a six-digit Indian PIN or a five-digit
+ZIP (with or without the +4).
 
 **Blank is always allowed** except the name — these are details you fill in as
 you learn them, and refusing to save a half-known address would be worse than
@@ -576,7 +584,8 @@ and shows those rows as nil.
 
 Books made before this feature existed gain the column when they are next
 opened — `db._migrate()` adds it, because `CREATE TABLE IF NOT EXISTS` leaves
-an existing table alone.
+an existing table alone. That is also where a settings key that has *moved*
+gets moved, such as the old single-box address.
 
 ## Difference in opening balances
 

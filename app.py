@@ -726,13 +726,19 @@ with tab_masters:
     saved_company = db.get_company()
     entered: dict[str, str] = {}
     columns = st.columns(3)
-    for position, field in enumerate(db.COMPANY_FIELDS):
+    slot_position = 0        # counted over the fields that TAKE a column, so a
+    for field in db.COMPANY_FIELDS:      # full-width one does not leave a hole
         current = saved_company.get(field.key, "")
         if field.kind == "multiline":
             entered[field.key] = st.text_area(
                 field.label, value=current, help=field.hint or None)
             continue
-        slot = columns[position % 3]
+        if field.wide:
+            entered[field.key] = st.text_input(
+                field.label, value=current, help=field.hint or None)
+            continue
+        slot = columns[slot_position % 3]
+        slot_position += 1
         with slot:
             if field.kind == "month":
                 entered[field.key] = str(st.selectbox(

@@ -357,10 +357,13 @@ print("\nCompany master")
 GOOD = {
     "company_name": "Aarkaya Handicrafts LLC",
     "mailing_name": "",
-    "address": "12 Mall Road\nNew Delhi",
+    "address1": "12 Mall Road",
+    "address2": "Connaught Place",
+    "address3": "",
+    "city": "New Delhi",
     "state": "Delhi",
-    "pincode": "110001",
     "country": "India",
+    "pincode": "110001",
     "phone": "011-5550123",
     "email": "books@aarkaya.example",
     "pan": "aaapz1234c",            # lower case on purpose
@@ -376,8 +379,11 @@ check("company details round-trip",
       db.get_company()["company_name"], GOOD["company_name"])
 check("identifiers are stored upper case", stored["pan"], "AAAPZ1234C")
 check("TAN upper-cased too", stored["tan"], "DELA12345B")
-check("the address keeps its line break",
-      db.get_company()["address"], GOOD["address"])
+check("each address line is its own field",
+      [db.get_company()[key] for key in db.ADDRESS_LINES],
+      ["12 Mall Road", "Connaught Place", ""])
+check("the city is kept apart from the lines",
+      db.get_company()["city"], "New Delhi")
 check("mailing name falls back to the company name",
       db.company_display_name(), GOOD["company_name"])
 db.save_company(dict(GOOD, mailing_name="Aarkaya Handicrafts"))
@@ -392,6 +398,13 @@ check("a blank currency falls back to the default",
 check("a blank financial year falls back to April",
       bare["fy_start_month"], "4")
 
+# The field is labelled ZIP / PIN, so it has to take either shape.
+for shape, value in (("an Indian PIN code", "110001"),
+                     ("a US ZIP", "45202"),
+                     ("a ZIP+4", "45202-1234")):
+    check(f"accepts {shape}",
+          db.validate_company(dict(GOOD, pincode=value))["pincode"], value)
+
 # A value that IS given has to be well formed - a malformed GSTIN is worse than
 # an absent one, because it reaches a filing looking legitimate.
 REJECT = {
@@ -401,7 +414,8 @@ REJECT = {
     "GSTIN not carrying the PAN": dict(GOOD, pan="BBBPZ1234C"),
     "malformed TAN": dict(GOOD, tan="XX1"),
     "malformed CIN": dict(GOOD, cin="NOPE"),
-    "five-digit PIN code": dict(GOOD, pincode="11000"),
+    "a four-digit postcode": dict(GOOD, pincode="1100"),
+    "a seven-digit postcode": dict(GOOD, pincode="1100012"),
     "not an e-mail": dict(GOOD, email="books-at-aarkaya"),
     "month 13": dict(GOOD, fy_start_month="13"),
     "date the wrong way round": dict(GOOD, books_begin="01/04/2026"),
@@ -724,7 +738,7 @@ check("with its amounts intact",
 check("and the books still balance",
       acc.trial_balance()["difference"], before_gap, tol=0.0)
 
-print("\n20) An older book gains the column it was made without")
+print("\n20) An older book gains what it was made without")
 # Books created before voiding existed have no `voided` column, and
 # CREATE TABLE IF NOT EXISTS will not add one. Simulate that exactly.
 legacy = Path(tempfile.gettempdir()) / "bkplus_legacy.db"
@@ -745,7 +759,11 @@ legacy_sql("ALTER TABLE vouchers DROP COLUMN voided",
            "ALTER TABLE vouchers DROP COLUMN voided_at",
            "INSERT INTO vouchers (voucher_type, number, voucher_date,"
            " narration, created_at) VALUES ('Journal', 1, '2026-04-01',"
-           " 'legacy', '2026-04-01')")
+           " 'legacy', '2026-04-01')",
+           # ...and it holds its address the old way, in one multi-line box.
+           "INSERT INTO settings (key, value) VALUES"
+           " ('company_name', 'Old Books'),"
+           " ('address', '12 Mall Road\nConnaught Place\nNew Delhi')")
 columns = {r[1] for r in legacy_sql("PRAGMA table_info(vouchers)")[0]}
 check("the legacy book really lacks it", "voided" in columns, False)
 
@@ -758,7 +776,30 @@ columns = {r[1] for r in columns}
 check("opening it adds the column", "voided" in columns, True)
 check("and every existing voucher is live, not voided",
       [r[0] for r in rows], [0])
+# A settings key dropped from COMPANY_FIELDS stays in the FILE; it just stops
+# being read. So the old address has to be moved, or it is invisible but
+# present - which looks exactly like the app lost it.
+settings = dict(legacy_sql("SELECT key, value FROM settings")[0])
+check("the old address was split across the lines",
+      [settings.get(key, "") for key in db.ADDRESS_LINES],
+      ["12 Mall Road", "Connaught Place", "New Delhi"])
+check("so the Company screen shows it",
+      db.get_company()["address1"], "12 Mall Road")
+check("the old key is gone", "address" in settings, False)
+check("but its text is kept", settings.get("address_legacy", ""),
+      "12 Mall Road\nConnaught Place\nNew Delhi")
+
 check("init_db can be run again safely", db.init_db(), None)
+# The move must not run twice: clearing a line then reopening must not refill
+# it from the legacy text, or an edit could never be saved.
+db.save_company(dict(db.get_company(), address2=""))
+db.init_db()
+check("and does not undo a later edit", db.get_company()["address2"], "")
+
+# Anything past the third line is folded in, never dropped.
+check("a four-line address keeps every word",
+      db._split_address("A\nB\nC\nD"), ["A", "B", "C, D"])
+check("blank lines are not lines", db._split_address("A\n\n \nB"), ["A", "B"])
 db.use_company(kept)
 legacy.unlink(missing_ok=True)
 
