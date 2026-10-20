@@ -160,9 +160,23 @@ class FrameTable(QtWidgets.QTableWidget):
         header = self.horizontalHeader()
         header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         if len(frame.columns):
-            widest = max(range(len(frame.columns)),
-                         key=lambda i: 1 if frame.columns[i] in numeric else 2)
-            header.setSectionResizeMode(widest, QtWidgets.QHeaderView.Stretch)
+            # One column takes the slack, and it has to be the one with the
+            # most to say. This used to pick the FIRST non-numeric column,
+            # which on the Day Book and the Ledger is `Date` - so a fixed
+            # ten-character date was handed 600px of stretch while the ledger
+            # names beside it were squeezed to fit. Measured in characters,
+            # which is enough to choose between columns; the actual widths
+            # are still Qt's.
+            def room_for(index: int) -> int:
+                column = frame.columns[index]
+                if column in numeric:
+                    return -1               # amounts are a known width
+                lengths = [len(str(v)) for v in frame[column]]
+                return max(lengths + [len(str(column))])
+
+            header.setSectionResizeMode(
+                max(range(len(frame.columns)), key=room_for),
+                QtWidgets.QHeaderView.Stretch)
 
 
 def mono_font() -> QtGui.QFont:
@@ -2207,7 +2221,8 @@ class DayBookScreen(QtWidgets.QWidget):
         self.count.setText(f"{len(self._frame)} voucher(s)"
                            + (f", {voided} voided" if voided else ""))
         if frame.empty:
-            shown = pd.DataFrame(columns=["Date", "Particulars", "Vch Type",
+            shown = pd.DataFrame(columns=["Date", "Debit account",
+                                          "Credit account", "Vch Type",
                                           "Vch No", "Debit", "Credit"])
         else:
             shown = self._frame.drop(columns=["voucher_id", "voided"])

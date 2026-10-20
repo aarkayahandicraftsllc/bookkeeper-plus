@@ -453,12 +453,15 @@ with tab_daybook:
             on_select="rerun", selection_mode="single-row",
             column_config={
                 "Date": st.column_config.DateColumn("Date", format=DATE_FMT.streamlit),
-                "Particulars": st.column_config.TextColumn("Particulars",
-                                                           width="large"),
+                "Debit account": st.column_config.TextColumn(
+                    "Debit account", width="medium"),
+                "Credit account": st.column_config.TextColumn(
+                    "Credit account", width="medium"),
                 "Debit": amount_col("Debit"), "Credit": amount_col("Credit"),
             })
-        st.caption("`Debit ← Credit` shows which ledgers each voucher moved "
-                   "value between. Select a row to open it.")
+        st.caption("Each voucher's two sides have a column each; a side that "
+                   "touches several ledgers lists them. Select a row to open "
+                   "it.")
 
         picked = list((chosen or {}).get("selection", {}).get("rows", []))
         if picked:

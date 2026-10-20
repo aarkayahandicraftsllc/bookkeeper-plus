@@ -260,8 +260,13 @@ def day_book(date_from=None, date_to=None) -> pd.DataFrame:
     # holding their number, even though they post nothing.
     lines = db.get_lines(date_from=date_from, date_to=date_to,
                          include_voided=True)
-    columns = ["Date", "Particulars", "Vch Type", "Vch No", "Debit", "Credit",
-               "voided", "voucher_id"]
+    # The two sides get a column each. They were one "A / B  <-  C" cell until
+    # 2026-10-20, which read as a sentence rather than as a table: you could
+    # not see down a column to find what a ledger was debited against, and an
+    # arrow in the middle of text is nothing a spreadsheet can filter on.
+    # Named "... account" because "Debit" and "Credit" here are the AMOUNTS.
+    columns = ["Date", "Debit account", "Credit account", "Vch Type", "Vch No",
+               "Debit", "Credit", "voided", "voucher_id"]
     if lines.empty:
         return pd.DataFrame(columns=columns)
 
@@ -273,7 +278,10 @@ def day_book(date_from=None, date_to=None) -> pd.DataFrame:
         voided = bool(head.get("voided", 0))
         records.append({
             "Date": head["voucher_date"],
-            "Particulars": " / ".join(debits) + "  ←  " + " / ".join(credits),
+            # A voucher may touch several ledgers on a side, so a cell can
+            # still hold a list - but only ever of one side's ledgers.
+            "Debit account": " / ".join(debits),
+            "Credit account": " / ".join(credits),
             "Vch Type": head["voucher_type"],
             "Vch No": int(head["number"]),
             # Shown as nil, not as what it used to be - a voided voucher moves

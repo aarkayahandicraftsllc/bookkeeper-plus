@@ -244,6 +244,22 @@ check("each row balances",
       float((book["Debit"] - book["Credit"]).abs().max()), 0.0)
 check("newest first", str(book.iloc[0]["Date"]), "2026-04-12")
 check("voucher types are named", "Contra" in set(book["Vch Type"]), True)
+
+# The two sides get a COLUMN EACH (user asked 2026-10-20). As one
+# "Rent  <-  Bank of India" cell you could not read down a column to see what
+# a ledger was debited against, and no spreadsheet can filter on an arrow.
+check("the sides have a column each, where Particulars was",
+      list(book.columns)[:3], ["Date", "Debit account", "Credit account"])
+rent = book[(book["Vch Type"] == "Payment")
+            & (book["Debit account"] == "Rent")].iloc[0]
+check("the debited ledger is in the debit column",
+      rent["Debit account"], "Rent")
+check("and the credited one in the credit column",
+      rent["Credit account"], "Bank of India")
+check("with no arrow left anywhere in the report",
+      any("←" in str(v) for row in book.itertuples(index=False) for v in row),
+      False)
+
 narrow = acc.day_book(date_from="2026-04-09", date_to="2026-04-10")
 check("the date filter works", len(narrow), 2)
 

@@ -161,6 +161,25 @@ db.save_voucher(voucher_type="Sales", voucher_date=date.today(),
 window.refresh_all()
 
 check("day book lists both vouchers", window.daybook.table.rowCount(), 2)
+
+# The two sides are a COLUMN EACH (user asked 2026-10-20), and one of them
+# has to take the table's slack. It used to go to the first non-numeric
+# column - `Date` - which handed a ten-character date 600px while the ledger
+# names beside it were squeezed.
+daybook_header = window.daybook.table.horizontalHeader()
+labels = [window.daybook.table.horizontalHeaderItem(i).text()
+          for i in range(window.daybook.table.columnCount())]
+check("the day book names both sides in their own columns",
+      labels[:3], ["Date", "Debit account", "Credit account"])
+stretched = [labels[i] for i in range(len(labels))
+             if daybook_header.sectionResizeMode(i)
+             == QtWidgets.QHeaderView.Stretch]
+# WHICH of the two it is depends on the ledger names in the book, so only
+# that it is one of them is asserted - the defect was that it was neither.
+check("and the slack goes to a ledger column, not to Date",
+      [c for c in stretched if c not in ("Debit account", "Credit account")],
+      [])
+check("exactly one column takes it", len(stretched), 1)
 check("trial balance has rows", window.trial.table.rowCount() > 0, True)
 check("trial balance reports agreement",
       "equal credits" in window.trial.status.text(), True)

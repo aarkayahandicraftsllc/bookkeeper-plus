@@ -401,7 +401,7 @@ Balances are held **debit-positive** internally: `+500` is 500 Dr, `-500` is
 | Screen | What it does |
 | --- | --- |
 | **Voucher Entry** | Type, date, auto number, narration, then a Dr/Cr grid with ledger autocomplete and running totals. Accept is disabled until the two sides agree. |
-| **Day Book** | Every voucher in the period, newest first. Double-click to alter one. |
+| **Day Book** | Every voucher in the period, newest first, with **Debit account** and **Credit account** as separate columns. Double-click to alter one. |
 | **Ledger** | One account: opening balance, every entry with **To**/**By** particulars naming the other side, a running balance, closing. |
 | **Trial Balance** | Closing balances as Dr and Cr, by ledger or summarised by group. |
 | **Profit & Loss** | Trading account → gross profit, then the indirect accounts → net profit. |
