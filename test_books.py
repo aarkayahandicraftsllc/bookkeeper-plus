@@ -168,6 +168,32 @@ check("capital shows as a credit",
       float(rows.loc["Capital - Owner", "Credit"]), 250_000.0)
 check("nil ledgers are omitted", "Stall Equipment" in rows.index, True)
 grouped = acc.trial_balance(by_group=True)
+# Accounts standing at nil are out unless asked for (user asked 2026-10-20).
+db.add_ledger("Never Used", "Indirect Expenses")
+plain = acc.trial_balance()
+withzero = acc.trial_balance(include_zero=True)
+check("an account with no balance is left out",
+      "Never Used" in set(plain["rows"]["Particulars"]), False)
+check("and shown when asked for",
+      "Never Used" in set(withzero["rows"]["Particulars"]), True)
+check("including it adds rows",
+      len(withzero["rows"]) > len(plain["rows"]), True)
+# THE POINT: nil adds nothing to a side, so the toggle cannot move the
+# figures - which is what makes it safe to flip while reading.
+check("but cannot change the debit total",
+      withzero["debit"], plain["debit"], tol=0.0)
+check("nor the credit total", withzero["credit"], plain["credit"], tol=0.0)
+check("nor the difference",
+      withzero["difference"], plain["difference"], tol=0.0)
+# Grouping can net two ledgers off against each other, so a GROUP can come to
+# nil out of balances that are not - that is a second place to filter.
+grouped_zero = acc.trial_balance(by_group=True, include_zero=True)
+check("by group, it still cannot move the totals",
+      [grouped_zero["debit"], grouped_zero["credit"]],
+      [acc.trial_balance(by_group=True)["debit"],
+       acc.trial_balance(by_group=True)["credit"]])
+db.delete_ledger(db.ledger_id("Never Used"))
+
 check("grouped trial balance also agrees", grouped["difference"], 0.0, tol=0.0)
 check("grouped totals match the detailed one", grouped["debit"], tb["debit"])
 

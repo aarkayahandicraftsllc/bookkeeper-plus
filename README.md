@@ -403,7 +403,7 @@ Balances are held **debit-positive** internally: `+500` is 500 Dr, `-500` is
 | **Voucher Entry** | Type, date, auto number, narration, then a Dr/Cr grid with ledger autocomplete and running totals. Accept is disabled until the two sides agree. **Copy** repeats a voucher without retyping it (bills excluded, GST carried). |
 | **Day Book** | Every voucher in the period, newest first, with **Debit account** and **Credit account** as separate columns. Double-click to alter one. |
 | **Ledger** | One account: opening balance, every entry with **To**/**By** particulars naming the other side, a running balance, closing. |
-| **Trial Balance** | Closing balances as Dr and Cr, by ledger or summarised by group. |
+| **Trial Balance** | Closing balances as Dr and Cr, by ledger or summarised by group, with or without **accounts standing at nil**. The total is a bar under the table, so the table itself can be sorted. |
 | **Profit & Loss** | Trading account → gross profit, then the indirect accounts → net profit. |
 | **Balance Sheet** | Liabilities and assets side by side, with net profit carried to Profit & Loss A/c. Summary, or **the accounts under each heading**. |
 | **Masters** | Create and alter ledgers and sub-groups. |

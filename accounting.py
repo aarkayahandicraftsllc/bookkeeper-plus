@@ -300,10 +300,22 @@ def day_book(date_from=None, date_to=None) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # trial balance
 # --------------------------------------------------------------------------- #
-def trial_balance(as_at=None, by_group: bool = False) -> dict:
-    """Closing balances with debit and credit columns that must agree."""
+def trial_balance(as_at=None, by_group: bool = False,
+                  include_zero: bool = False) -> dict:
+    """Closing balances with debit and credit columns that must agree.
+
+    Accounts standing at nil are LEFT OUT unless `include_zero` is asked for
+    (user asked 2026-10-20 for the choice). Out by default because a trial
+    balance is read to find what the figures are, and a page of blank lines
+    is in the way of that; in, when the question is whether an account exists
+    at all or has been used this year.
+
+    The totals cannot move either way - nil adds nothing to a side - which is
+    what makes the toggle safe to flip while reading.
+    """
     frame = balances(as_at)
-    frame = frame[frame["closing"].abs() > EPS]
+    if not include_zero:
+        frame = frame[frame["closing"].abs() > EPS]
 
     if by_group:
         grouped = frame.groupby("group_name", as_index=False)["closing"].sum()
@@ -313,7 +325,11 @@ def trial_balance(as_at=None, by_group: bool = False) -> dict:
         rows = frame[["ledger", "group_name", "closing"]].rename(
             columns={"ledger": "Particulars", "group_name": "Under"})
 
-    rows = rows[rows["closing"].abs() > EPS].copy()
+    # Said twice on purpose: grouping can net two ledgers off against each
+    # other, so a group can come to nil out of balances that are not.
+    if not include_zero:
+        rows = rows[rows["closing"].abs() > EPS]
+    rows = rows.copy()
     rows["Debit"] = rows["closing"].map(lambda v: round(v, 2) if v > 0 else 0.0)
     rows["Credit"] = rows["closing"].map(lambda v: round(-v, 2) if v < 0 else 0.0)
     rows = rows.drop(columns=["closing"]).reset_index(drop=True)

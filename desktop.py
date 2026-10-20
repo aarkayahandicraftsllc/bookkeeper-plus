@@ -2948,9 +2948,18 @@ class TrialBalanceScreen(QtWidgets.QWidget):
         self.period = PeriodBar(with_from=False)
         self.period.changed.connect(self.refresh)
         layout.addWidget(self.period)
+        choices = QtWidgets.QHBoxLayout()
         self.by_group = QtWidgets.QCheckBox("Summarise by group")
         self.by_group.toggled.connect(self.refresh)
-        layout.addWidget(self.by_group)
+        choices.addWidget(self.by_group)
+        # Out by default: a trial balance is read to find the figures, and a
+        # page of blank lines is in the way of that. In when the question is
+        # whether an account exists at all, or has been used this year.
+        self.with_zero = QtWidgets.QCheckBox("Include accounts with no balance")
+        self.with_zero.toggled.connect(self.refresh)
+        choices.addWidget(self.with_zero)
+        choices.addStretch(1)
+        layout.addLayout(choices)
         self.status = flowing(QtWidgets.QLabel())
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -2971,13 +2980,16 @@ class TrialBalanceScreen(QtWidgets.QWidget):
         return Report(
             title="Trial Balance",
             period=period_caption(self.period)
-            + ("  ·  summarised by group" if self.by_group.isChecked() else ""),
+            + ("  ·  summarised by group" if self.by_group.isChecked() else "")
+            + ("  ·  including accounts with no balance"
+               if self.with_zero.isChecked() else ""),
             sections=[ReportSection("", self._shown, ("Debit", "Credit"))],
             notes=[self.status.text()])
 
     def refresh(self) -> None:
         _, as_at = self.period.range()
-        trial = acc.trial_balance(as_at, by_group=self.by_group.isChecked())
+        trial = acc.trial_balance(as_at, by_group=self.by_group.isChecked(),
+                                  include_zero=self.with_zero.isChecked())
         rows = trial["rows"]
         if rows.empty:
             self._shown = pd.DataFrame(

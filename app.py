@@ -569,8 +569,15 @@ with tab_ledger:
 with tab_trial:
     st.subheader("Trial Balance")
     as_at = as_at_picker("tb")
-    grouped = st.toggle("Summarise by group", key="tb_group")
-    trial = acc.trial_balance(as_at, by_group=grouped)
+    t1, t2 = st.columns(2)
+    with t1:
+        grouped = st.toggle("Summarise by group", key="tb_group")
+    with t2:
+        # Out by default: a trial balance is read to find the figures, and a
+        # page of blank lines is in the way of that.
+        with_zero = st.toggle("Include accounts with no balance",
+                              key="tb_zero")
+    trial = acc.trial_balance(as_at, by_group=grouped, include_zero=with_zero)
 
     k1, k2, k3 = st.columns(3)
     k1.metric("Total debit", money(trial["debit"]))

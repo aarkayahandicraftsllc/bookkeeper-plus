@@ -1385,6 +1385,32 @@ check("the trial balance table holds no Total row",
 check("but the report it prints does",
       str(tb.report().sections[0].frame["Particulars"].iloc[-1]), "Total")
 check("and its table offers sorting", tb.table._pinned_last, False)
+# The zero-balance toggle (user asked 2026-10-20). Out by default.
+db.add_ledger("Dormant Account", "Indirect Expenses")
+tb.refresh()
+settle()
+lean = tb.table.rowCount()
+listed = [tb.table.item(r, 0).text() for r in range(lean)]
+check("an account with no balance is not listed",
+      "Dormant Account" in listed, False)
+tb.with_zero.setChecked(True)
+settle()
+check("ticking the toggle brings it in",
+      "Dormant Account" in [tb.table.item(r, 0).text()
+                            for r in range(tb.table.rowCount())], True)
+check("which is more rows", tb.table.rowCount() > lean, True)
+as_at = tb.period.range()[1]
+check("the totals cannot move - nil adds nothing to a side",
+      acc.trial_balance(as_at, include_zero=True)["debit"],
+      acc.trial_balance(as_at)["debit"], tol=0.0)
+check("and the printed report says it is included",
+      "no balance" in tb.report().period, True)
+tb.with_zero.setChecked(False)
+settle()
+check("unticking puts it back", tb.table.rowCount(), lean)
+db.delete_ledger(db.ledger_id("Dormant Account"))
+tb.refresh()
+settle()
 tb.table.sort_by(0)
 settle()
 names = [tb.table.item(r, 0).text() for r in range(tb.table.rowCount())]
