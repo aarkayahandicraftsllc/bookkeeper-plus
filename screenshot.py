@@ -42,6 +42,24 @@ def _books() -> Path:
     return target
 
 
+def settle(app) -> None:
+    """Let Qt catch up, INCLUDING the deletions.
+
+    `processEvents()` does not deliver DeferredDelete at the same event-loop
+    level, so a widget retired with `deleteLater()` is still on screen when
+    the picture is taken. The totals bars are rebuilt on every refresh that
+    way, so a shot showed two of them - a defect in the screenshot, not in
+    the app, which is the worst kind to go looking for.
+    """
+    # Imported here, not at the top: Qt must not load before BOOKS_DB is
+    # pinned, which is the whole reason main() imports it late too.
+    from PySide6 import QtCore
+
+    app.processEvents()
+    app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scheme", action="append", default=None,
@@ -90,7 +108,7 @@ def main() -> int:
         window.resize(window.size())
         for index in args.screens:
             window.show_screen(index)
-            app.processEvents()
+            settle(app)
             label = window.screens[index][0].replace("&&", "&")
             slug = label.lower().replace(" ", "-").replace("&", "and")
             tag = f"-{args.tag}" if args.tag else ""

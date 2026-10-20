@@ -400,12 +400,12 @@ Balances are held **debit-positive** internally: `+500` is 500 Dr, `-500` is
 
 | Screen | What it does |
 | --- | --- |
-| **Voucher Entry** | Type, date, auto number, narration, then a Dr/Cr grid with ledger autocomplete and running totals. Accept is disabled until the two sides agree. |
+| **Voucher Entry** | Type, date, auto number, narration, then a Dr/Cr grid with ledger autocomplete and running totals. Accept is disabled until the two sides agree. **Copy** repeats a voucher without retyping it (bills excluded, GST carried). |
 | **Day Book** | Every voucher in the period, newest first, with **Debit account** and **Credit account** as separate columns. Double-click to alter one. |
 | **Ledger** | One account: opening balance, every entry with **To**/**By** particulars naming the other side, a running balance, closing. |
 | **Trial Balance** | Closing balances as Dr and Cr, by ledger or summarised by group. |
 | **Profit & Loss** | Trading account → gross profit, then the indirect accounts → net profit. |
-| **Balance Sheet** | Liabilities and assets side by side, with net profit carried to Profit & Loss A/c. |
+| **Balance Sheet** | Liabilities and assets side by side, with net profit carried to Profit & Loss A/c. Summary, or **the accounts under each heading**. |
 | **Masters** | Create and alter ledgers and sub-groups. |
 | **Company** | Who the books belong to: name, address, PAN, GSTIN, TAN, CIN, financial year, currency. |
 
@@ -699,3 +699,36 @@ taking a screenshot cannot write to `data/`, and it never shows the window. It
 runs on the *native* platform rather than offscreen on purpose: Light keeps the
 native widget style, and offscreen would render it as Fusion — that is, not the
 thing being judged.
+
+## Sorting a report
+
+**Click a column header** to sort by it; click the same one again to reverse
+it. Every report table does this, and the sort you choose survives a refresh,
+so posting a voucher does not quietly put the report back to its own order.
+
+It sorts by VALUE, not by what the cell says. An amount reads `1,234.00` and a
+date reads `19/10/2026`; sorted as text, 1,234 would come before 900 and
+October before March. Each cell carries a sort key — the number, or the ISO
+date under what is displayed — and text sorts case-folded, so capitals do not
+all come before lower case.
+
+**Two kinds of table do not offer it**, because a sort would make them say
+something untrue:
+
+* one with a **pinned total row** — the total would be carried into the middle
+  of the figures it totals. The Trial Balance keeps its total in a bar under
+  the table for exactly this reason.
+* the **detailed Balance Sheet**, where accounts are indented under their
+  heading. Sorting would scatter them away from the heading they belong to.
+
+## Balance Sheet: summary or detailed
+
+**Show the accounts under each heading** turns `Current Assets 467,000.00`
+into that heading *followed by* Bank, Cash and the debtor that make it up,
+indented. The headings and both side totals are identical in the two formats,
+so they can be read against each other line for line — detail is added
+beneath a heading, never instead of it.
+
+One consequence, said on the screen and in the export too: in detailed form
+the Amount column holds **both** a heading's total and its accounts, so
+summing the column gives twice the side. The side totals are the ones to read.

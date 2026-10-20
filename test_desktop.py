@@ -1277,6 +1277,86 @@ settle()
 check("the Day Book came back with it", daybook_date(),
       when.strftime("%d/%m/%Y"))
 
+print("\n22c) Clicking a column header sorts the report")
+window.show_screen(1)
+window.daybook.refresh()
+settle()
+table = window.daybook.table
+labels = [table.horizontalHeaderItem(i).text()
+          for i in range(table.columnCount())]
+unsorted_first = table.key_at(0)
+
+# Amounts must sort as NUMBERS. Read as text, "1,500.00" comes before
+# "100.00", which is the whole reason a cell carries a sort key.
+debit_col = labels.index("Debit")
+table.sort_by(debit_col)
+settle()
+amounts = [desktop.parse_amount(table.item(r, debit_col).text())
+           for r in range(table.rowCount())]
+check("sorting by an amount orders it by value",
+      amounts, sorted(amounts))
+table.sort_by(debit_col)
+settle()
+amounts_down = [desktop.parse_amount(table.item(r, debit_col).text())
+                for r in range(table.rowCount())]
+check("clicking the same header again reverses it",
+      amounts_down, sorted(amounts_down, reverse=True))
+
+# Dates must sort CHRONOLOGICALLY even though they READ dd/MM/yyyy. Every
+# voucher in this book is dated today, so the real case is built by hand:
+# 14 October and 2 November sort the wrong way round as text, which is
+# exactly the trap the sort key exists for.
+probe = desktop.FrameTable()
+probe.load(pd.DataFrame({"Date": ["2026-11-02", "2026-10-14"],
+                         "Particulars": ["second", "first"]}))
+check("the two dates really do sort wrongly as text",
+      sorted(probe.item(r, 0).text() for r in range(2)),
+      ["02/11/2026", "14/10/2026"])
+probe.sort_by(0)
+check("but sorting the column is chronological",
+      [probe.item(r, 0).text() for r in range(2)],
+      ["14/10/2026", "02/11/2026"])
+check("so the rows moved with it",
+      [probe.item(r, 1).text() for r in range(2)], ["first", "second"])
+probe.deleteLater()
+
+# THE REGRESSION THIS COULD HAVE INTRODUCED: the Day Book opened the voucher
+# at the clicked POSITION in the frame, so after a sort it would have opened
+# a different voucher than the one on that line.
+table.sort_by(labels.index("Vch No"))
+settle()
+moved_first = table.key_at(0)
+check("the sort really moved the rows", moved_first != unsorted_first, True)
+window.daybook._open(table.model().index(0, 0))
+settle()
+check("double-click after a sort opens the row that was clicked",
+      window.voucher.editing_id, int(moved_first))
+window.voucher.reset()
+
+# A total row cannot survive a sort, so the Trial Balance keeps its total in
+# a bar under the table - but the PRINTED report still carries it as a row.
+window.show_screen(3)
+settle()
+tb = window.trial
+check("the trial balance table holds no Total row",
+      [tb.table.item(r, 0).text() for r in range(tb.table.rowCount())
+       if tb.table.item(r, 0).text() == "Total"], [])
+check("but the report it prints does",
+      str(tb.report().sections[0].frame["Particulars"].iloc[-1]), "Total")
+check("and its table offers sorting", tb.table._pinned_last, False)
+tb.table.sort_by(0)
+settle()
+names = [tb.table.item(r, 0).text() for r in range(tb.table.rowCount())]
+check("which sorts it, case-insensitively",
+      names, sorted(names, key=str.casefold))
+
+# Left as it was found, so the later sections see the default order.
+for screen in (window.daybook.table, window.trial.table):
+    screen._sort = None
+window.daybook.refresh()
+window.trial.refresh()
+settle()
+
 print("\n23) Voiding, restoring and deleting a voucher")
 db.use_company(TMP)
 voucher = window.voucher
@@ -1353,6 +1433,138 @@ check("and gives the number up",
       db.next_voucher_number("Journal"), number_before - 1)
 QtWidgets.QMessageBox.question = _real_question
 voucher.reset()
+
+print("\n23b) The balance sheet, summarised and detailed")
+window.show_screen(5)
+settle()
+bs = window.sheet
+check("it opens summarised", bs.detailed.isChecked(), False)
+summary_rows = bs.liabilities.rowCount()
+summary_total = bs.liability_label.text()
+check("and its tables can be sorted", bs.liabilities._pinned_last, False)
+
+bs.detailed.setChecked(True)
+settle()
+check("ticking it adds rows", bs.liabilities.rowCount() > summary_rows, True)
+check("which are indented accounts",
+      any(bs.liabilities.item(r, 0).text().startswith(acc.DETAIL_INDENT)
+          for r in range(bs.liabilities.rowCount())), True)
+check("the side total does NOT change", bs.liability_label.text(),
+      summary_total)
+# An indented table cannot be sorted: the accounts would be carried away from
+# the heading they belong under, and the statement would say nothing true.
+check("so sorting is withdrawn while it is detailed",
+      bs.liabilities._pinned_last, True)
+before_sort = [bs.liabilities.item(r, 0).text()
+               for r in range(bs.liabilities.rowCount())]
+bs.liabilities.sort_by(0)
+settle()
+check("and clicking a header does nothing",
+      [bs.liabilities.item(r, 0).text()
+       for r in range(bs.liabilities.rowCount())], before_sort)
+check("the printed report says which format it is",
+      "under each heading" in bs.report().period, True)
+check("and warns that the column holds both",
+      any("totals above are the ones to read" in n for n in bs.report().notes),
+      True)
+
+bs.detailed.setChecked(False)
+settle()
+check("unticking it goes back to the summary",
+      bs.liabilities.rowCount(), summary_rows)
+check("and sorting comes back", bs.liabilities._pinned_last, False)
+
+print("\n23c) Copying a voucher, for an entry that repeats")
+db.use_company(TMP)
+v = window.voucher
+window.show_screen(0)
+v.reset()
+settle()
+
+# Derived, not hardcoded: earlier sections post, void and delete, so which
+# types have a voucher to copy is not fixed.
+has = [k for k in db.VOUCHER_TYPES if db.last_voucher_id(k) is not None]
+none_yet = [k for k in db.VOUCHER_TYPES if db.last_voucher_id(k) is None]
+check("some type has a voucher to copy", bool(has), True)
+
+kind = has[0]
+v.type_box.setCurrentText(kind)
+settle()
+check("the button names the voucher it would copy",
+      v.copy_button.text(), f"Copy last {kind.lower()}")
+check("and is offered", v.copy_button.isEnabled(), True)
+
+source_id = db.last_voucher_id(kind)
+head, lines = db.get_voucher(source_id)
+expected = [(str(ln["ledger_name"]), float(ln["debit"]), float(ln["credit"]))
+            for ln in lines]
+next_number = db.next_voucher_number(kind)
+
+v.copy_voucher()
+settle()
+copied = [(n, r["debit"], r["credit"]) for n, r in
+          zip([v.grid.cellWidget(i, 0).currentText()
+               for i in range(v.grid.rowCount())], v.row_values())]
+check("the lines came across", [(n, d, c) for n, d, c in copied], expected)
+check("it is a NEW voucher, not an edit of the old one", v.editing_id, None)
+check("numbered next, not the number it copied",
+      v.number_label.text(), f"No. {next_number}")
+check("dated today, which is the field you would always have to change",
+      desktop.from_qdate(v.date_edit.date()), date.today())
+check("the narration came too", v.narration.text(), str(head["narration"]))
+check("and the grid still has exactly one spare line",
+      v.grid.rowCount(), len(expected) + 1)
+check("nothing is saved until you accept it",
+      db.next_voucher_number(kind), next_number)
+
+v.accept_voucher()
+settle()
+check("accepting it posts the copy, so the type has one more voucher",
+      db.next_voucher_number(kind), next_number + 1)
+made = db.last_voucher_id(kind)
+check("and the voucher it was copied FROM is untouched",
+      db.get_voucher(source_id)[0]["number"], head["number"])
+db.delete_voucher(int(made))        # leave the book as it was found
+window.refresh_all()
+
+# From a voucher being altered, the same button copies THAT one.
+v.load_voucher(int(source_id))
+settle()
+check("while altering, the button offers this voucher",
+      v.copy_button.text(), "Copy this voucher")
+v.copy_voucher()
+settle()
+check("which also starts a new voucher", v.editing_id, None)
+check("carrying the same lines", len(v.row_values()), len(expected))
+v.reset()
+settle()
+
+if none_yet:
+    v.type_box.setCurrentText(none_yet[0])
+    settle()
+    check("a type with no vouchers yet cannot be copied",
+          v.copy_button.isEnabled(), False)
+    check("and the button says why",
+          "no" in v.copy_button.toolTip().lower(), True)
+v.type_box.setCurrentText(kind)
+v.reset()
+settle()
+
+
+# Plus only: what a copy does with the two things Bookkeeper has not got.
+billed = [k for k in db.VOUCHER_TYPES
+          if db.last_voucher_id(k) is not None
+          and any(ln.get("bills") for ln in
+                  db.get_voucher(db.last_voucher_id(k))[1])]
+if billed:
+    v.type_box.setCurrentText(billed[0])
+    settle()
+    v.copy_voucher()
+    settle()
+    check("a copy carries no bill allocations - a repeat is a NEW bill",
+          [b for r in v.row_values() for b in r.get("bills", [])], [])
+    v.reset()
+    settle()
 
 print("\n24) The shortcuts actually fire, pressed for real")
 # Binding a key is not the same as the key working, which is the whole lesson

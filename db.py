@@ -1523,6 +1523,27 @@ def next_voucher_number(voucher_type: str) -> int:
     return int(row[0])
 
 
+def last_voucher_id(voucher_type: str) -> int | None:
+    """The most recently entered voucher of a type, for copying it forward.
+
+    Ordered by NUMBER, not date: "the last one" here means the last one
+    entered, which is what a recurring entry gets copied from - a voucher
+    back-dated into last month is not the one you want to repeat.
+
+    Voided ones are skipped. A voided voucher is a record of something that
+    did not happen, so it is not what "the last one" means when the whole
+    point is to do it again. Copying a voided voucher you are LOOKING at
+    stays possible, because that is an explicit choice.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM vouchers WHERE voucher_type = ? AND voided = 0"
+            " ORDER BY number DESC LIMIT 1",
+            (voucher_type,),
+        ).fetchone()
+    return int(row["id"]) if row else None
+
+
 def _validate_lines(lines: list[dict], ledgers: pd.DataFrame) -> list[dict]:
     known = set(ledgers["id"].astype(int))
     cleaned = []

@@ -401,8 +401,23 @@ def net_profit(as_at=None) -> float:
 # --------------------------------------------------------------------------- #
 # balance sheet
 # --------------------------------------------------------------------------- #
-def balance_sheet(as_at=None) -> dict:
-    """Both sides as at a date, balanced, with the residual named honestly."""
+DETAIL_INDENT = "    "
+
+
+def balance_sheet(as_at=None, detailed: bool = False) -> dict:
+    """Both sides as at a date, balanced, with the residual named honestly.
+
+    `detailed` lists the ACCOUNTS under each heading as well as the heading's
+    own total (asked for 2026-10-20: "i need balance sheet in detailed as well
+    as summary format so I can see accounts under each header"). The headings
+    and the totals are identical either way - detail is added beneath them,
+    never instead of them, so the two formats can be compared line for line.
+
+    NOTE for anyone summing the Amount column: in detailed form it holds a
+    heading's total AND the accounts that make it up, so the column adds up to
+    twice the side. The totals in `totals` are the ones to use, and they are
+    computed from the headings alone.
+    """
     frame = balances(as_at)
     groups = db.get_groups()
     lineage = db.group_lineage(groups)
@@ -448,9 +463,16 @@ def balance_sheet(as_at=None) -> dict:
             assets.append(["Difference in opening balances", round(-residual, 2)])
             asset_total = round(asset_total - residual, 2)
 
+    if detailed:
+        # Added AFTER both totals are settled, so the headings still decide
+        # what the side comes to and the two formats cannot disagree.
+        liabilities = _with_accounts(liabilities, real, sign=-1)
+        assets = _with_accounts(assets, real, sign=1)
+
     return {
         "liabilities": pd.DataFrame(liabilities, columns=["Particulars", "Amount"]),
         "assets": pd.DataFrame(assets, columns=["Particulars", "Amount"]),
+        "detailed": detailed,
         "totals": {
             "liabilities": liability_total,
             "assets": asset_total,
@@ -747,3 +769,26 @@ def gst_register(date_from=None, date_to=None,
             "voucher_id": int(row.voucher_id),
         })
     return pd.DataFrame(rows, columns=columns)
+
+
+def _with_accounts(rows: list[list], real: pd.DataFrame,
+                   sign: int) -> list[list]:
+    """Each heading followed by the accounts that make it up, indented.
+
+    Only real headings gain detail. "Profit & Loss A/c" and "Difference in
+    opening balances" are figures this statement works out for itself, not
+    groups with ledgers under them, so they stay single lines - looking them
+    up would find nothing and print an empty heading.
+    """
+    out: list[list] = []
+    for name, amount in rows:
+        out.append([name, amount])
+        under = real[real["primary"] == name]
+        if under.empty:
+            continue
+        for row in under.sort_values("ledger").itertuples():
+            value = round(sign * float(row.closing), 2)
+            if abs(value) <= EPS:
+                continue
+            out.append([f"{DETAIL_INDENT}{row.ledger}", value])
+    return out

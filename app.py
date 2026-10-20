@@ -682,7 +682,11 @@ with tab_pl:
 with tab_bs:
     st.subheader("Balance Sheet")
     bs_as_at = as_at_picker("bs")
-    sheet = acc.balance_sheet(bs_as_at)
+    # Summary by default; ticking it lists the accounts under each heading.
+    # The headings and both side totals are the same either way.
+    bs_detailed = st.checkbox("Show the accounts under each heading",
+                              key="bs_detailed")
+    sheet = acc.balance_sheet(bs_as_at, detailed=bs_detailed)
 
     b1, b2, b3 = st.columns(3)
     b1.metric("Liabilities", money(sheet["totals"]["liabilities"]))
@@ -714,6 +718,12 @@ with tab_bs:
         st.dataframe(sheet["assets"], hide_index=True, width="stretch",
                      height=table_height(len(sheet["assets"]), None),
                      column_config={"Amount": amount_col("Amount")})
+    if bs_detailed:
+        st.caption(
+            "Each heading is followed by the accounts that make it up, so the "
+            "Amount column holds both — the side totals above are the ones to "
+            "read, not the sum of the column."
+        )
     st.caption(
         "Profit & Loss A/c carries the net profit from the start of the books to "
         "this date. Nominal ledgers are closed into it rather than listed here."

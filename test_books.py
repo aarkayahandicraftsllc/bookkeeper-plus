@@ -208,6 +208,46 @@ check("current assets", float(asset.loc["Current Assets", "Amount"]), 467_000.0)
 check("assets total", bs["totals"]["assets"], 517_000.0)
 check("liabilities total", bs["totals"]["liabilities"], 517_000.0)
 
+# Detailed form (user asked 2026-10-20: "i need balance sheet in detailed as
+# well as summary format so I can see accounts under each header"). The
+# accounts go UNDER the headings, never instead of them.
+deep = acc.balance_sheet(detailed=True)
+check("the totals are the same in both formats",
+      [deep["totals"][k] for k in ("liabilities", "assets", "difference")],
+      [bs["totals"][k] for k in ("liabilities", "assets", "difference")])
+headings = [p for p in deep["assets"]["Particulars"]
+            if not p.startswith(acc.DETAIL_INDENT)]
+check("every heading from the summary is still there, in order",
+      headings, list(bs["assets"]["Particulars"]))
+accounts = {p.strip(): a for p, a in
+            zip(deep["assets"]["Particulars"], deep["assets"]["Amount"])
+            if p.startswith(acc.DETAIL_INDENT)}
+check("the accounts appear under their heading",
+      sorted(accounts), ["Acme Traders", "Bank of India", "Cash",
+                         "Stall Equipment"])
+check("each with its own closing balance",
+      float(accounts["Bank of India"]), 302_000.0)
+# Fixed Assets 50,000 = Stall Equipment 50,000; Current Assets 467,000 =
+# bank 302,000 + cash 15,000 + debtor 150,000. The detail has to ADD UP to
+# the heading, or one of the two formats is lying.
+detail_under = {}
+current = None
+for particular, amount in zip(deep["assets"]["Particulars"],
+                              deep["assets"]["Amount"]):
+    if particular.startswith(acc.DETAIL_INDENT):
+        detail_under[current] = round(detail_under[current] + float(amount), 2)
+    else:
+        current = particular
+        detail_under[current] = 0.0
+check("and the detail adds up to the heading above it",
+      detail_under,
+      {p: float(a) for p, a in zip(bs["assets"]["Particulars"],
+                                   bs["assets"]["Amount"])})
+check("a worked-out figure stays a single line, with nothing under it",
+      [p for p in deep["liabilities"]["Particulars"]
+       if p.startswith(acc.DETAIL_INDENT)
+       and "Profit & Loss" in p], [])
+
 print("\n10) A ledger statement reads like Tally's")
 st = acc.ledger_statement(db.ledger_id("Bank of India"))
 check("opening", st["opening"], 200_000.0)
