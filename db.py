@@ -109,7 +109,17 @@ CREATE TABLE IF NOT EXISTS ledgers (
     notes        TEXT    NOT NULL DEFAULT '',
     is_reserved  INTEGER NOT NULL DEFAULT 0,
     active       INTEGER NOT NULL DEFAULT 1,
-    bill_wise    INTEGER NOT NULL DEFAULT 0
+    bill_wise    INTEGER NOT NULL DEFAULT 0,
+    -- GST. `gst_rate` is NULL for a ledger that is not taxable at all, which
+    -- is NOT the same as 0: nil-rated and exempt supplies are taxable at
+    -- zero per cent and have to be reported as such.
+    gst_rate     REAL,
+    -- Which tax ledger this is, if it is one. Named explicitly rather than
+    -- matched on the ledger's title, so renaming "Output CGST" cannot quietly
+    -- detach it from the arithmetic.
+    gst_role     TEXT    NOT NULL DEFAULT '',
+    gstin        TEXT    NOT NULL DEFAULT '',
+    state_code   TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS vouchers (
@@ -166,6 +176,26 @@ CREATE TABLE IF NOT EXISTS bill_allocations (
     -- Only an on-account allocation may be nameless; everything else has to
     -- be findable by reference or it can never be settled.
     CHECK (kind = 'on_account' OR bill_ref <> '')
+);
+
+-- The GST facts of a voucher that CANNOT be derived from its lines: the rate
+-- charged, who the counterparty was for tax purposes, and where the supply
+-- was made. The amounts are deliberately NOT stored - taxable value and tax
+-- are summed from the voucher's own lines, so there is one source of truth
+-- for money, the same decision as for bills.
+--
+-- Place of supply and the party's GSTIN ARE stored, because they are a
+-- snapshot: a return filed for August must keep saying what it said then,
+-- even if the customer later moves state or registers.
+CREATE TABLE IF NOT EXISTS gst_details (
+    voucher_id      INTEGER PRIMARY KEY
+                    REFERENCES vouchers(id) ON DELETE CASCADE,
+    party_ledger_id INTEGER REFERENCES ledgers(id),
+    party_gstin     TEXT    NOT NULL DEFAULT '',
+    place_of_supply TEXT    NOT NULL DEFAULT '',
+    supply_type     TEXT    NOT NULL DEFAULT 'intra'
+                    CHECK (supply_type IN ('intra', 'inter')),
+    rate            REAL    NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_alloc_line ON bill_allocations(line_id);
@@ -743,6 +773,17 @@ def _migrate(conn) -> None:
 
     ledger_columns = {row["name"] for row in
                       conn.execute("PRAGMA table_info(ledgers)").fetchall()}
+    # GST. Each is additive and safe to skip; gst_rate is deliberately
+    # NULLABLE, because "not taxable" and "taxable at 0%" are different
+    # things and a nil-rated supply still has to be reported.
+    for column, declaration in (("gst_rate", "REAL"),
+                                ("gst_role", "TEXT NOT NULL DEFAULT ''"),
+                                ("gstin", "TEXT NOT NULL DEFAULT ''"),
+                                ("state_code", "TEXT NOT NULL DEFAULT ''")):
+        if column not in ledger_columns:
+            conn.execute(f"ALTER TABLE ledgers ADD COLUMN {column}"
+                         f" {declaration}")
+
     if "bill_wise" not in ledger_columns:
         conn.execute("ALTER TABLE ledgers ADD COLUMN bill_wise INTEGER NOT"
                      " NULL DEFAULT 0")
@@ -837,6 +878,11 @@ def init_db() -> None:
                 "UPDATE settings SET value = ? WHERE key = 'books_begin'",
                 (start.isoformat(),),
             )
+
+    # After the block above has committed, because it opens its own
+    # connection: nesting connect() inside a write transaction would wait on
+    # a lock the outer call is still holding.
+    seed_gst_ledgers()
 
 
 # --------------------------------------------------------------------------- #
@@ -999,7 +1045,8 @@ def defaults_to_bill_wise(group: str) -> bool:
 
 def add_ledger(name: str, group: str, opening: float = 0.0,
                opening_side: str = "Dr", notes: str = "",
-               bill_wise: bool | None = None) -> int:
+               bill_wise: bool | None = None, gst_rate: float | None = None,
+               gstin: str = "", state_code: str = "") -> int:
     name = name.strip()
     if not name:
         raise ValueError("A ledger needs a name.")
@@ -1017,16 +1064,21 @@ def add_ledger(name: str, group: str, opening: float = 0.0,
             raise ValueError(f"There is already a ledger called {name!r}.")
         cur = conn.execute(
             "INSERT INTO ledgers (name, group_id, opening, opening_side, notes,"
-            " bill_wise) VALUES (?, ?, ?, ?, ?, ?)",
+            " bill_wise, gst_rate, gstin, state_code)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, gid, round(float(opening), 2), opening_side, notes.strip(),
-             1 if bill_wise else 0),
+             1 if bill_wise else 0,
+             None if gst_rate is None else round(float(gst_rate), 2),
+             gstin, state_code),
         )
         return int(cur.lastrowid)
 
 
 def update_ledger(ledger: int, name: str, group: str, opening: float,
                   opening_side: str, notes: str = "", active: bool = True,
-                  bill_wise: bool | None = None) -> None:
+                  bill_wise: bool | None = None,
+                  gst_rate: float | None = None, gstin: str | None = None,
+                  state_code: str | None = None) -> None:
     if opening_side not in SIDES:
         raise ValueError("Opening side must be 'Dr' or 'Cr'.")
     if float(opening) < 0:
@@ -1039,12 +1091,22 @@ def update_ledger(ledger: int, name: str, group: str, opening: float,
             row = conn.execute("SELECT bill_wise FROM ledgers WHERE id = ?",
                                (int(ledger),)).fetchone()
             bill_wise = bool(row and row["bill_wise"])
+        row = conn.execute("SELECT gst_rate, gstin, state_code FROM ledgers"
+                           " WHERE id = ?", (int(ledger),)).fetchone()
         conn.execute(
             "UPDATE ledgers SET name = ?, group_id = ?, opening = ?,"
-            " opening_side = ?, notes = ?, active = ?, bill_wise = ?"
-            " WHERE id = ?",
+            " opening_side = ?, notes = ?, active = ?, bill_wise = ?,"
+            " gst_rate = ?, gstin = ?, state_code = ? WHERE id = ?",
             (name.strip(), group_id(group), round(float(opening), 2), opening_side,
              notes.strip(), 1 if active else 0, 1 if bill_wise else 0,
+             # None means "leave it", not "clear it" - the same convention as
+             # bill_wise above, so a caller that knows nothing about GST
+             # cannot wipe a rate by saving a ledger.
+             (row["gst_rate"] if row else None) if gst_rate is None
+             else round(float(gst_rate), 2),
+             (row["gstin"] if row else "") if gstin is None else gstin.strip().upper(),
+             (row["state_code"] if row else "") if state_code is None
+             else state_code.strip(),
              int(ledger)),
         )
 
@@ -1068,6 +1130,219 @@ def delete_ledger(ledger: int) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# GST
+# --------------------------------------------------------------------------- #
+# The state codes a GSTIN opens with. Held here because the first two
+# characters of a GSTIN ARE the state code, which is what decides whether a
+# supply is taxed as CGST+SGST or as IGST - so this is arithmetic, not a
+# dropdown's worth of decoration.
+STATE_CODES = {
+    "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab",
+    "04": "Chandigarh", "05": "Uttarakhand", "06": "Haryana", "07": "Delhi",
+    "08": "Rajasthan", "09": "Uttar Pradesh", "10": "Bihar", "11": "Sikkim",
+    "12": "Arunachal Pradesh", "13": "Nagaland", "14": "Manipur",
+    "15": "Mizoram", "16": "Tripura", "17": "Meghalaya", "18": "Assam",
+    "19": "West Bengal", "20": "Jharkhand", "21": "Odisha",
+    "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+    "26": "Dadra & Nagar Haveli and Daman & Diu", "27": "Maharashtra",
+    "29": "Karnataka", "30": "Goa", "31": "Lakshadweep", "32": "Kerala",
+    "33": "Tamil Nadu", "34": "Puducherry", "35": "Andaman & Nicobar Islands",
+    "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh",
+    "97": "Other Territory",
+}
+
+# The common slabs. Not a closed set - any rate can be typed - because the
+# slabs change by notification and an app that refused a new one would be
+# wrong the day after it moved.
+GST_SLABS = (0.0, 0.1, 0.25, 1.0, 1.5, 3.0, 5.0, 6.0, 7.5, 12.0, 18.0, 28.0)
+
+# The six tax ledgers, seeded under Duties & Taxes. `gst_role` is what the
+# arithmetic looks them up by, so these names are only what you read.
+GST_LEDGERS = (
+    ("Output CGST", "output_cgst"),
+    ("Output SGST", "output_sgst"),
+    ("Output IGST", "output_igst"),
+    ("Input CGST", "input_cgst"),
+    ("Input SGST", "input_sgst"),
+    ("Input IGST", "input_igst"),
+)
+GST_ROLES = tuple(role for _name, role in GST_LEDGERS)
+OUTPUT_ROLES = tuple(r for r in GST_ROLES if r.startswith("output"))
+INPUT_ROLES = tuple(r for r in GST_ROLES if r.startswith("input"))
+GST_SEEDED_KEY = "gst_ledgers_seeded"
+
+
+def state_code_of(gstin: str) -> str:
+    """The state a GSTIN belongs to, or '' if it does not look like one."""
+    gstin = (gstin or "").strip().upper()
+    return gstin[:2] if len(gstin) >= 2 and gstin[:2] in STATE_CODES else ""
+
+
+def state_name(code: str) -> str:
+    return STATE_CODES.get((code or "").strip(), "")
+
+
+def company_state_code() -> str:
+    """Our own state, from our GSTIN, falling back to the State field.
+
+    The GSTIN is preferred because it cannot disagree with itself: a typed
+    state name can say Kerala while the GSTIN says 33 (Tamil Nadu), and the
+    GSTIN is the one the tax follows.
+    """
+    company = get_company()
+    from_gstin = state_code_of(company.get("gstin", ""))
+    if from_gstin:
+        return from_gstin
+    typed = (company.get("state") or "").strip().lower()
+    for code, name in STATE_CODES.items():
+        if name.lower() == typed:
+            return code
+    return ""
+
+
+def seed_gst_ledgers() -> None:
+    """Create the six tax ledgers, once.
+
+    Reserved, so they cannot be deleted out from under the GST report, and
+    marked by `gst_role` so the report finds them however they are renamed.
+    """
+    if get_setting(GST_SEEDED_KEY):
+        return
+    with connect() as conn:
+        group = conn.execute(
+            "SELECT id FROM groups WHERE name = 'Duties & Taxes'").fetchone()
+        if group is None:
+            return
+        for name, role in GST_LEDGERS:
+            existing = conn.execute(
+                "SELECT id FROM ledgers WHERE name = ?", (name,)).fetchone()
+            if existing:
+                conn.execute("UPDATE ledgers SET gst_role = ? WHERE id = ?",
+                             (role, existing["id"]))
+                continue
+            conn.execute(
+                "INSERT INTO ledgers (name, group_id, is_reserved, gst_role)"
+                " VALUES (?, ?, 1, ?)", (name, group["id"], role))
+        conn.execute("INSERT INTO settings (key, value) VALUES (?, '1')"
+                     " ON CONFLICT(key) DO UPDATE SET value = '1'",
+                     (GST_SEEDED_KEY,))
+
+
+def gst_ledger_ids() -> dict[str, int]:
+    """Tax ledger id by role — how every GST figure is found."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, gst_role FROM ledgers WHERE gst_role <> ''").fetchall()
+    return {row["gst_role"]: int(row["id"]) for row in rows}
+
+
+def supply_type(place_of_supply: str, our_state: str | None = None) -> str:
+    """'intra' when the supply stays in our state, otherwise 'inter'.
+
+    This single comparison is the whole of the CGST/SGST-versus-IGST
+    decision, which is why it is derived rather than asked on every voucher.
+    An unknown place of supply is treated as intra-state: that is what a
+    counter sale to an unregistered walk-in customer is.
+    """
+    ours = (our_state if our_state is not None else company_state_code()).strip()
+    theirs = (place_of_supply or "").strip()
+    if not theirs or not ours:
+        return "intra"
+    return "intra" if theirs == ours else "inter"
+
+
+def split_tax(taxable: float, rate: float, kind: str) -> dict[str, float]:
+    """The tax on an amount, split the way the supply requires.
+
+    Intra-state splits the rate down the middle into CGST and SGST; inter
+    state puts the whole of it on IGST. Each half is rounded on its own and
+    the second takes the remainder, so the two always add back to the total
+    - halving 18% of 1,050 gives 94.50 twice, but a rate that does not
+    halve cleanly would otherwise lose or gain a paisa against the invoice.
+    """
+    taxable = round(float(taxable), 2)
+    total = round(taxable * float(rate) / 100.0, 2)
+    if kind == "inter":
+        return {"cgst": 0.0, "sgst": 0.0, "igst": total}
+    half = round(total / 2, 2)
+    return {"cgst": half, "sgst": round(total - half, 2), "igst": 0.0}
+
+
+def save_gst_details(voucher_id: int, *, party_ledger_id: int | None,
+                     party_gstin: str, place_of_supply: str,
+                     supply: str, rate: float) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO gst_details (voucher_id, party_ledger_id,"
+            " party_gstin, place_of_supply, supply_type, rate)"
+            " VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(voucher_id) DO UPDATE SET"
+            " party_ledger_id = excluded.party_ledger_id,"
+            " party_gstin = excluded.party_gstin,"
+            " place_of_supply = excluded.place_of_supply,"
+            " supply_type = excluded.supply_type, rate = excluded.rate",
+            (int(voucher_id), party_ledger_id,
+             (party_gstin or "").strip().upper(),
+             (place_of_supply or "").strip(), supply, round(float(rate), 2)))
+
+
+def clear_gst_details(voucher_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM gst_details WHERE voucher_id = ?",
+                     (int(voucher_id),))
+
+
+def get_gst_details(voucher_id: int) -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM gst_details WHERE voucher_id = ?",
+                           (int(voucher_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def get_gst_vouchers(date_from=None, date_to=None,
+                     include_voided: bool = False) -> pd.DataFrame:
+    """Every voucher carrying GST, with its taxable value and tax.
+
+    The amounts are SUMMED FROM THE LINES rather than read from
+    `gst_details`, which holds only what the lines cannot say. So a voucher
+    edited afterwards reports its new figures with nothing to re-save, and
+    the GST report can never disagree with the ledgers it came from.
+    """
+    sql = (
+        "SELECT v.id AS voucher_id, v.voucher_type, v.number, v.voucher_date,"
+        " v.narration, v.voided, g.party_ledger_id, g.party_gstin,"
+        " g.place_of_supply, g.supply_type, g.rate,"
+        " p.name AS party,"
+        " COALESCE(SUM(CASE WHEN l.gst_role = '' AND l.gst_rate IS NOT NULL"
+        "      THEN ABS(vl.debit - vl.credit) END), 0) AS taxable,"
+        " COALESCE(SUM(CASE WHEN l.gst_role IN ('output_cgst', 'input_cgst')"
+        "      THEN ABS(vl.debit - vl.credit) END), 0) AS cgst,"
+        " COALESCE(SUM(CASE WHEN l.gst_role IN ('output_sgst', 'input_sgst')"
+        "      THEN ABS(vl.debit - vl.credit) END), 0) AS sgst,"
+        " COALESCE(SUM(CASE WHEN l.gst_role IN ('output_igst', 'input_igst')"
+        "      THEN ABS(vl.debit - vl.credit) END), 0) AS igst"
+        " FROM gst_details g"
+        " JOIN vouchers v ON v.id = g.voucher_id"
+        " LEFT JOIN ledgers p ON p.id = g.party_ledger_id"
+        " JOIN voucher_lines vl ON vl.voucher_id = v.id"
+        " JOIN ledgers l ON l.id = vl.ledger_id"
+        " WHERE 1 = 1"
+    )
+    params: list = []
+    if not include_voided:
+        sql += " AND v.voided = 0"
+    if date_from is not None:
+        sql += " AND v.voucher_date >= ?"
+        params.append(str(date_from))
+    if date_to is not None:
+        sql += " AND v.voucher_date <= ?"
+        params.append(str(date_to))
+    sql += " GROUP BY v.id ORDER BY v.voucher_date, v.id"
+    with connect() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
 # vouchers
 # --------------------------------------------------------------------------- #
 def next_voucher_number(voucher_type: str) -> int:
@@ -1262,7 +1537,7 @@ def voucher_type_warnings(voucher_type: str, lines: list[dict],
 
 def save_voucher(*, voucher_type: str, voucher_date, narration: str,
                  lines: list[dict], voucher_id: int | None = None,
-                 number: int | None = None) -> int:
+                 number: int | None = None, gst: dict | None = None) -> int:
     """Post a voucher. Refuses anything that does not balance."""
     if voucher_type not in VOUCHER_TYPES:
         raise ValueError(f"Unknown voucher type {voucher_type!r}")
@@ -1319,7 +1594,37 @@ def save_voucher(*, voucher_type: str, voucher_date, narration: str,
                      if kind in ("new", "advance") else "",
                      order),
                 )
+    _store_gst(int(voucher_id), gst)
     return int(voucher_id)
+
+
+def _store_gst(voucher_id: int, gst: dict | None) -> None:
+    """Record the GST facts of a voucher, or clear ones left behind.
+
+    `gst=None` means "say nothing about GST", which on a NEW voucher means
+    there is none. On an edited one it means leave what is there - EXCEPT
+    when the voucher no longer has a single tax line, in which case the
+    details are stale and go. Without that, taking the tax off a voucher
+    would leave it still listed on the GST return.
+    """
+    if gst:
+        save_gst_details(
+            voucher_id,
+            party_ledger_id=gst.get("party_ledger_id"),
+            party_gstin=gst.get("party_gstin", ""),
+            place_of_supply=gst.get("place_of_supply", ""),
+            supply=gst.get("supply_type")
+            or supply_type(gst.get("place_of_supply", "")),
+            rate=gst.get("rate", 0.0))
+        return
+    with connect() as conn:
+        taxed = conn.execute(
+            "SELECT COUNT(*) FROM voucher_lines vl"
+            " JOIN ledgers l ON l.id = vl.ledger_id"
+            " WHERE vl.voucher_id = ? AND l.gst_role <> ''",
+            (voucher_id,)).fetchone()[0]
+    if not taxed:
+        clear_gst_details(voucher_id)
 
 
 def get_vouchers(date_from=None, date_to=None,

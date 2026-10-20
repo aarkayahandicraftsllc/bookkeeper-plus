@@ -615,3 +615,127 @@ def open_bills(ledger: int, as_at=None) -> pd.DataFrame:
     if bills.empty:
         return bills
     return bills.sort_values("Date").reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# GST
+# --------------------------------------------------------------------------- #
+# Which voucher types make an outward supply (tax you collect and owe) and
+# which an inward one (tax you have paid and can set off).
+OUTWARD = ("Sales",)
+INWARD = ("Purchase",)
+
+
+def gst_summary(date_from=None, date_to=None) -> dict:
+    """Output tax, input tax, and what is left to pay.
+
+    Every figure is summed from the VOUCHER LINES, with `gst_details` saying
+    only what the lines cannot - the rate charged, the place of supply, the
+    counterparty's GSTIN. So a voucher corrected afterwards reports its new
+    numbers with nothing to re-run, and this can never disagree with the
+    Duties & Taxes ledgers it is drawn from.
+    """
+    frame = db.get_gst_vouchers(date_from=date_from, date_to=date_to)
+    rate_columns = ["Rate", "Taxable", "CGST", "SGST", "IGST", "Tax"]
+    blank = pd.DataFrame(columns=rate_columns)
+    empty = {
+        "outward": blank.copy(), "inward": blank.copy(),
+        "totals": {"output_tax": 0.0, "input_tax": 0.0, "net": 0.0,
+                   "outward_taxable": 0.0, "inward_taxable": 0.0},
+        "by_supply": pd.DataFrame(columns=["Supply", "Taxable", "Tax"]),
+    }
+    if frame.empty:
+        return empty
+
+    frame = frame.copy()
+    frame["tax"] = (frame["cgst"] + frame["sgst"] + frame["igst"]).round(2)
+
+    def by_rate(part: pd.DataFrame) -> pd.DataFrame:
+        if part.empty:
+            return blank.copy()
+        grouped = part.groupby("rate", as_index=False)[
+            ["taxable", "cgst", "sgst", "igst", "tax"]].sum().round(2)
+        grouped = grouped.sort_values("rate").reset_index(drop=True)
+        return pd.DataFrame({
+            "Rate": grouped["rate"].map(lambda r: f"{r:g}%"),
+            "Taxable": grouped["taxable"], "CGST": grouped["cgst"],
+            "SGST": grouped["sgst"], "IGST": grouped["igst"],
+            "Tax": grouped["tax"]}, columns=rate_columns)
+
+    out = frame[frame["voucher_type"].isin(OUTWARD)]
+    inp = frame[frame["voucher_type"].isin(INWARD)]
+    output_tax = round(float(out["tax"].sum()), 2) if not out.empty else 0.0
+    input_tax = round(float(inp["tax"].sum()), 2) if not inp.empty else 0.0
+
+    supply = pd.DataFrame(columns=["Supply", "Taxable", "Tax"])
+    if not out.empty:
+        grouped = out.groupby("supply_type", as_index=False)[
+            ["taxable", "tax"]].sum().round(2)
+        supply = pd.DataFrame({
+            "Supply": grouped["supply_type"].map(
+                {"intra": "Within the state", "inter": "Interstate"}),
+            "Taxable": grouped["taxable"], "Tax": grouped["tax"]},
+            columns=["Supply", "Taxable", "Tax"]).reset_index(drop=True)
+
+    return {
+        "outward": by_rate(out),
+        "inward": by_rate(inp),
+        "by_supply": supply,
+        "totals": {
+            "output_tax": output_tax,
+            "input_tax": input_tax,
+            # Positive is payable, negative is credit carried forward. Named
+            # rather than shown as a bare signed figure, because "you owe
+            # 4,000" and "you are owed 4,000" are not a sign apart in use.
+            "net": round(output_tax - input_tax, 2),
+            "outward_taxable": round(float(out["taxable"].sum()), 2)
+            if not out.empty else 0.0,
+            "inward_taxable": round(float(inp["taxable"].sum()), 2)
+            if not inp.empty else 0.0,
+        },
+    }
+
+
+def gst_register(date_from=None, date_to=None,
+                 outward: bool = True) -> pd.DataFrame:
+    """Invoice-by-invoice GST, the shape an outward-supplies return wants.
+
+    Place of supply and the counterparty's GSTIN come from `gst_details`
+    because they are a SNAPSHOT: a return filed for August has to keep
+    saying what it said then, even after the customer moves state or
+    registers. The money comes from the lines.
+    """
+    frame = db.get_gst_vouchers(date_from=date_from, date_to=date_to)
+    columns = ["Date", "Vch Type", "Vch No", "Party", "GSTIN", "Place of supply",
+               "Supply", "Rate", "Taxable", "CGST", "SGST", "IGST", "Total",
+               "voucher_id"]
+    kinds = OUTWARD if outward else INWARD
+    if not frame.empty:
+        frame = frame[frame["voucher_type"].isin(kinds)]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for row in frame.itertuples():
+        tax = round(row.cgst + row.sgst + row.igst, 2)
+        rows.append({
+            "Date": str(row.voucher_date),
+            "Vch Type": row.voucher_type,
+            "Vch No": int(row.number),
+            "Party": row.party or "",
+            # Blank is meaningful: an unregistered customer has no GSTIN, and
+            # those supplies are reported separately on a real return.
+            "GSTIN": row.party_gstin or "",
+            "Place of supply": (db.state_name(row.place_of_supply)
+                                or row.place_of_supply or ""),
+            "Supply": "Interstate" if row.supply_type == "inter"
+                      else "Within the state",
+            "Rate": f"{row.rate:g}%",
+            "Taxable": round(float(row.taxable), 2),
+            "CGST": round(float(row.cgst), 2),
+            "SGST": round(float(row.sgst), 2),
+            "IGST": round(float(row.igst), 2),
+            "Total": round(float(row.taxable) + tax, 2),
+            "voucher_id": int(row.voucher_id),
+        })
+    return pd.DataFrame(rows, columns=columns)

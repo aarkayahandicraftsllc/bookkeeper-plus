@@ -166,7 +166,8 @@ check("trial balance reports agreement",
 check("balance sheet agrees", "Both sides agree" in window.sheet.status.text(), True)
 check("net profit shown on the P&L",
       "68,000.00" in window.profit.net_label.text(), True)   # 80,000 - 12,000
-check("masters lists the ledgers", window.masters.ledger_table.rowCount(), 7)
+check("masters lists the ledgers, plus the six seeded tax ledgers",
+      window.masters.ledger_table.rowCount(), 7 + len(db.GST_LEDGERS))
 check("masters lists the groups", window.masters.group_table.rowCount(), 27)
 
 print("\n8) The ledger screen shows a statement")
@@ -203,7 +204,8 @@ window.masters.led_open.setValue(2_500)
 window.masters.led_side.setCurrentText("Dr")
 window.masters.create_ledger()
 check("the ledger exists", "Petty Cash" in set(db.get_ledgers()["name"]), True)
-check("masters shows it", window.masters.ledger_table.rowCount(), 8)
+check("masters shows it",
+      window.masters.ledger_table.rowCount(), 8 + len(db.GST_LEDGERS))
 check("voucher entry offers it straight away",
       "Petty Cash" in window.voucher._ledger_names, True)
 check("the opening difference is now reported",

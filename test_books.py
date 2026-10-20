@@ -24,6 +24,7 @@ shutil.rmtree(SANDBOX, ignore_errors=True)
 SANDBOX.mkdir(parents=True, exist_ok=True)
 os.environ["BOOKS_DIR"] = str(SANDBOX)
 
+import pandas as pd  # noqa: E402
 import accounting as acc  # noqa: E402
 import db  # noqa: E402
 
@@ -79,7 +80,15 @@ db.add_ledger("Acme Traders", "Sundry Debtors")
 db.add_ledger("Bharat Supplies", "Sundry Creditors")
 
 ledgers = db.get_ledgers().set_index("name")
-check("ledger count", len(ledgers), 11)
+# The six GST tax ledgers are seeded too, so count the ones made HERE rather
+# than every ledger in the book - otherwise this breaks each time the app
+# seeds another master, which says nothing about what is being tested.
+check("ledger count",
+      len([n for n in ledgers.index
+           if n not in [name for name, _role in db.GST_LEDGERS]]), 11)
+check("and the tax ledgers are there as well, seeded not entered",
+      len([n for n in ledgers.index
+           if n in [name for name, _role in db.GST_LEDGERS]]), 6)
 check("opening Dr is positive",
       float(ledgers.loc["Bank of India", "opening_signed"]), 200_000.0)
 check("opening Cr is negative",
@@ -1028,6 +1037,226 @@ before = len(db.get_allocations())
 db.init_db()
 check("opening again backfills nothing a second time",
       len(db.get_allocations()), before)
+
+print("\n23) GST: which tax applies, how much, and what it ties to")
+
+check("a GSTIN opens with its state code",
+      db.state_code_of("29AAAPZ1234C1Z5"), "29")
+check("named", db.state_name("29"), "Karnataka")
+check("rubbish is not a state code", db.state_code_of("hello"), "")
+check("nor is a code that does not exist", db.state_code_of("99AAAPZ1234C1Z5"), "")
+
+db.save_company({**db.get_company(), "company_name": "GST Probe",
+                 "pan": "AAAPZ1234C", "gstin": "29AAAPZ1234C1Z5",
+                 "state": "Kerala"})
+# The GSTIN wins: a typed state name can disagree with it, and the tax
+# follows the GSTIN.
+check("our own state comes from our GSTIN, not the typed State field",
+      db.company_state_code(), "29")
+
+check("a supply inside our state is intra", db.supply_type("29"), "intra")
+check("one to another state is inter", db.supply_type("27"), "inter")
+check("an unknown place of supply is treated as intra, like a counter sale",
+      db.supply_type(""), "intra")
+
+# --- the split ---------------------------------------------------------- #
+check("intra-state halves the rate into CGST and SGST",
+      db.split_tax(10_000, 18.0, "intra"),
+      {"cgst": 900.0, "sgst": 900.0, "igst": 0.0})
+check("interstate puts the whole rate on IGST",
+      db.split_tax(20_000, 18.0, "inter"),
+      {"cgst": 0.0, "sgst": 0.0, "igst": 3600.0})
+odd = db.split_tax(1_050, 18.0, "intra")
+check("an amount that does not halve cleanly still adds back exactly",
+      round(odd["cgst"] + odd["sgst"], 2), 189.0)
+check("with the odd paisa on the second half, not lost",
+      [odd["cgst"], odd["sgst"]], [94.5, 94.5])
+third = db.split_tax(100.0, 5.0, "intra")
+check("and a genuinely odd total splits without losing a paisa",
+      round(third["cgst"] + third["sgst"], 2), 5.0)
+check("nil-rated is a real rate, not an absence",
+      db.split_tax(5_000, 0.0, "intra"),
+      {"cgst": 0.0, "sgst": 0.0, "igst": 0.0})
+
+# --- the tax ledgers ---------------------------------------------------- #
+roles = db.gst_ledger_ids()
+check("all six tax ledgers are seeded", sorted(roles), sorted(db.GST_ROLES))
+ledgers = db.get_ledgers(include_inactive=True).set_index("name")
+check("under Duties & Taxes",
+      str(ledgers.loc["Output CGST", "group_name"]), "Duties & Taxes")
+check("and reserved, so the report cannot lose them",
+      bool(ledgers.loc["Output CGST", "is_reserved"]), True)
+db.seed_gst_ledgers()
+check("seeding again creates nothing", db.gst_ledger_ids(), roles)
+
+check("a taxable ledger carries a rate",
+      db.add_ledger("Sales 18%", "Sales Accounts", gst_rate=18.0) > 0, True)
+db.add_ledger("Purchases 5%", "Purchase Accounts", gst_rate=5.0)
+db.add_ledger("Exempt Sales", "Sales Accounts", gst_rate=0.0)
+rates = db.get_ledgers().set_index("name")
+check("0% is stored as a rate", float(rates.loc["Exempt Sales", "gst_rate"]), 0.0)
+# The distinction the nullable column exists for.
+check("while a ledger that is not taxable at all has no rate",
+      rates.loc["Cash", "gst_rate"] is None
+      or pd.isna(rates.loc["Cash", "gst_rate"]), True)
+
+db.add_ledger("Local Co", "Sundry Debtors", gstin="29BBBPZ1234C1Z5",
+              state_code="29")
+db.add_ledger("Far Co", "Sundry Debtors", gstin="27CCCPZ1234C1Z5",
+              state_code="27")
+db.add_ledger("A Supplier", "Sundry Creditors", gstin="29DDDPZ1234C1Z5",
+              state_code="29")
+
+
+def gst_sale(party, taxable, rate, pos, ref, when=date(2026, 8, 10)):
+    kind = db.supply_type(pos)
+    tax = db.split_tax(taxable, rate, kind)
+    total = round(taxable + tax["cgst"] + tax["sgst"] + tax["igst"], 2)
+    lines = [{"ledger_id": db.ledger_id(party), "debit": total, "credit": 0,
+              "bills": [{"kind": "new", "bill_ref": ref, "signed": total}]},
+             {"ledger_id": db.ledger_id("Sales 18%"), "debit": 0,
+              "credit": taxable}]
+    for key, role in (("cgst", "output_cgst"), ("sgst", "output_sgst"),
+                      ("igst", "output_igst")):
+        if tax[key]:
+            lines.append({"ledger_id": roles[role], "debit": 0,
+                          "credit": tax[key]})
+    return db.save_voucher(
+        voucher_type="Sales", voucher_date=when, narration=ref, lines=lines,
+        gst={"party_ledger_id": db.ledger_id(party),
+             "party_gstin": str(db.get_ledgers().set_index("name")
+                                .loc[party, "gstin"]),
+             "place_of_supply": pos, "supply_type": kind, "rate": rate})
+
+
+local = gst_sale("Local Co", 10_000, 18.0, "29", "GINV-1")
+far = gst_sale("Far Co", 20_000, 18.0, "27", "GINV-2")
+gst_sale("Local Co", 1_050, 18.0, "29", "GINV-3")
+
+tax = db.split_tax(40_000, 5.0, "intra")
+total = round(40_000 + tax["cgst"] + tax["sgst"], 2)
+db.save_voucher(
+    voucher_type="Purchase", voucher_date=date(2026, 8, 12), narration="GBILL-7",
+    lines=[{"ledger_id": db.ledger_id("Purchases 5%"), "debit": 40_000,
+            "credit": 0},
+           {"ledger_id": roles["input_cgst"], "debit": tax["cgst"], "credit": 0},
+           {"ledger_id": roles["input_sgst"], "debit": tax["sgst"], "credit": 0},
+           {"ledger_id": db.ledger_id("A Supplier"), "debit": 0, "credit": total,
+            "bills": [{"kind": "new", "bill_ref": "GBILL-7", "signed": -total}]}],
+    gst={"party_ledger_id": db.ledger_id("A Supplier"),
+         "party_gstin": "29DDDPZ1234C1Z5", "place_of_supply": "29",
+         "supply_type": "intra", "rate": 5.0})
+
+summary = db.get_setting  # keep the name short below
+s = acc.gst_summary()
+check("output tax across the three sales", s["totals"]["output_tax"], 5_589.0)
+check("input tax on the purchase", s["totals"]["input_tax"], 2_000.0)
+check("so this much is payable", s["totals"]["net"], 3_589.0)
+check("outward taxable value", s["totals"]["outward_taxable"], 31_050.0)
+
+# THE check: the summary is drawn from the lines, so it must equal the tax
+# LEDGERS. If these disagree, one of the two is lying about the return.
+held = acc.balances().set_index("ledger")
+
+
+def ledger_tax(prefix):
+    return round(sum(abs(float(held.loc[f"{prefix} {t}", "closing"]))
+                     for t in ("CGST", "SGST", "IGST")), 2)
+
+
+check("output tax equals the Output tax ledgers",
+      s["totals"]["output_tax"], ledger_tax("Output"), tol=0.0)
+check("input tax equals the Input tax ledgers",
+      s["totals"]["input_tax"], ledger_tax("Input"), tol=0.0)
+check("and the books still balance", acc.trial_balance()["difference"],
+      gap_before, tol=0.0)
+
+by_supply = s["by_supply"].set_index("Supply")
+check("interstate sales are reported apart from local ones",
+      float(by_supply.loc["Interstate", "Taxable"]), 20_000.0)
+check("as is the tax on them",
+      float(by_supply.loc["Interstate", "Tax"]), 3_600.0)
+check("the rate breakdown only lists rates actually used",
+      list(s["outward"]["Rate"]), ["18%"])
+check("and the inward side separately", list(s["inward"]["Rate"]), ["5%"])
+
+# --- the register -------------------------------------------------------- #
+# Indexed by the voucher numbers actually assigned - earlier sections have
+# already posted Sales vouchers, so these do not start at 1.
+num_local = int(db.get_voucher(local)[0]["number"])
+num_far = int(db.get_voucher(far)[0]["number"])
+reg = acc.gst_register(outward=True).set_index("Vch No")
+check("every sale is listed invoice by invoice", len(reg), 3)
+check("with the place of supply spelled out",
+      str(reg.loc[num_far, "Place of supply"]), "Maharashtra")
+check("and named as interstate", str(reg.loc[num_far, "Supply"]), "Interstate")
+check("the total is taxable plus tax",
+      float(reg.loc[num_local, "Total"]), 11_800.0)
+check("purchases are not on the outward register",
+      "Purchase" in set(reg["Vch Type"]), False)
+check("but they are on the inward one",
+      set(acc.gst_register(outward=False)["Vch Type"]), {"Purchase"})
+
+# Place of supply and the counterparty's GSTIN are a SNAPSHOT: a return
+# filed for August must keep saying what it said then.
+db.update_ledger(db.ledger_id("Far Co"), "Far Co", "Sundry Debtors", 0.0, "Dr",
+                 gstin="19EEEPZ1234C1Z5", state_code="19")
+again = acc.gst_register(outward=True).set_index("Vch No")
+check("moving the customer does NOT rewrite a filed invoice",
+      str(again.loc[num_far, "GSTIN"]), "27CCCPZ1234C1Z5")
+check("nor where the supply was made",
+      str(again.loc[num_far, "Place of supply"]), "Maharashtra")
+
+# The amounts, by contrast, are derived - so a correction reports itself.
+head, lines = db.get_voucher(local)
+for line in lines:
+    if line["ledger_name"] == "Sales 18%":
+        line["credit"] = 12_000.0
+    if line["ledger_name"] == "Local Co":
+        line["debit"] = 14_160.0
+        line["bills"] = [{"kind": "new", "bill_ref": "GINV-1",
+                          "signed": 14_160.0}]
+    if line["ledger_name"] in ("Output CGST", "Output SGST"):
+        line["credit"] = 1_080.0
+db.save_voucher(voucher_id=local, voucher_type="Sales",
+                voucher_date=head["voucher_date"], narration="GINV-1 revised",
+                lines=lines)
+check("correcting a voucher re-reports its GST with nothing to re-run",
+      acc.gst_summary()["totals"]["output_tax"], 5_949.0)
+check("and the summary still equals the tax ledgers",
+      acc.gst_summary()["totals"]["output_tax"],
+      round(sum(abs(float(acc.balances().set_index("ledger")
+                          .loc[f"Output {t}", "closing"]))
+                for t in ("CGST", "SGST", "IGST")), 2), tol=0.0)
+
+# --- a voided invoice is not a supply ----------------------------------- #
+before_void = acc.gst_summary()["totals"]["output_tax"]
+db.void_voucher(far)
+check("voiding an invoice takes it off the GST return",
+      far in set(acc.gst_register(outward=True)["voucher_id"]), False)
+check("and its tax out of the output total",
+      acc.gst_summary()["totals"]["output_tax"],
+      round(before_void - 3_600.0, 2))
+db.restore_voucher(far)
+check("restoring puts it back",
+      acc.gst_summary()["totals"]["output_tax"], before_void)
+
+# --- taking the tax off a voucher must take it off the return ----------- #
+head, lines = db.get_voucher(local)
+kept = [line for line in lines
+        if line["ledger_name"] not in ("Output CGST", "Output SGST")]
+for line in kept:
+    if line["ledger_name"] == "Local Co":
+        line["debit"] = 12_000.0
+        line["bills"] = [{"kind": "new", "bill_ref": "GINV-1",
+                          "signed": 12_000.0}]
+db.save_voucher(voucher_id=local, voucher_type="Sales",
+                voucher_date=head["voucher_date"], narration="GINV-1 no tax",
+                lines=kept)
+check("a voucher stripped of its tax lines leaves the GST return",
+      db.get_gst_details(local), None)
+check("rather than sitting on it with no tax",
+      local in set(acc.gst_register(outward=True)["voucher_id"]), False)
 
 print("\n" + ("ALL CHECKS PASSED" if not FAILURES else f"FAILURES: {FAILURES}"))
 raise SystemExit(1 if FAILURES else 0)

@@ -222,7 +222,12 @@ def voucher_editor(prefix: str = "vch", existing: dict | None = None,
     k = lambda name: f"{prefix}_{name}_{n}"  # noqa: E731
 
     ledgers = db.get_ledgers()
-    if len(ledgers) < 2:
+    # Counting ledgers you would actually post to. The six GST tax ledgers are
+    # seeded into every book, so a plain count makes a fresh install look
+    # ready when it still has nothing of yours in it.
+    own = ledgers[ledgers["gst_role"] == ""] if "gst_role" in ledgers.columns \
+        else ledgers
+    if len(own) < 2:
         st.warning(
             "You need at least two ledgers before you can post anything. "
             "Create them under **Masters**."
