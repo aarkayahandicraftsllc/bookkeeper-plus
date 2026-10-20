@@ -1003,5 +1003,31 @@ check("the picker offers only that party's bills",
 check("oldest first, the order they are usually settled in",
       list(picker["Date"]), sorted(picker["Date"]))
 
+print("\n22) Party lines posted before bills existed are accounted for")
+# Books written by an earlier version have party lines with NO allocations at
+# all. Left alone, the outstanding report would show nothing while the
+# balance sheet showed the party owing money - under-reporting in silence.
+# Simulated by throwing the allocations away and clearing the marker.
+with db.connect() as conn:
+    conn.execute("DELETE FROM bill_allocations")
+    conn.execute("DELETE FROM settings WHERE key = ?", (db.BACKFILL_KEY,))
+check("with the allocations gone, the party has no bills at all",
+      len(acc.outstanding()["bills"]), 0)
+check("so the report and the ledger disagree - the thing to avoid",
+      reconciles("Acme Ltd") != 0.0, True)
+
+db.init_db()
+check("opening the books backfills them", db.get_setting(db.BACKFILL_KEY), "1")
+check("as on-account money, which is what it is",
+      set(acc.outstanding()["on_account"]["Party"]) >= {"Acme Ltd"}, True)
+check("and the party reconciles to the ledger again",
+      reconciles("Acme Ltd"), 0.0, tol=0.0)
+check("no bills are invented out of it", len(acc.outstanding()["bills"]), 0)
+
+before = len(db.get_allocations())
+db.init_db()
+check("opening again backfills nothing a second time",
+      len(db.get_allocations()), before)
+
 print("\n" + ("ALL CHECKS PASSED" if not FAILURES else f"FAILURES: {FAILURES}"))
 raise SystemExit(1 if FAILURES else 0)

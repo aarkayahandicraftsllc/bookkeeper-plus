@@ -761,6 +761,228 @@ class LedgerDialog(QtWidgets.QDialog):
 # --------------------------------------------------------------------------- #
 # voucher entry
 # --------------------------------------------------------------------------- #
+class BillsDialog(QtWidgets.QDialog):
+    """Attach one voucher line to bills: open a new one, or settle open ones.
+
+    The party's open bills are listed with what is left on each, so settling
+    is a matter of typing into the row rather than remembering a reference.
+    Anything left unallocated is reported here and saved on account, not
+    silently dropped - which is what the data layer does with it too.
+    """
+
+    def __init__(self, parent, *, party: str, ledger_id: int, amount: float,
+                 existing: list[dict] | None = None,
+                 suggested_ref: str = "", as_at=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Bills — {party}")
+        self.ledger_id = int(ledger_id)
+        # Signed, so the sign of every allocation follows the line it is on.
+        self.amount = round(float(amount), 2)
+        self.allocations: list[dict] = []
+
+        layout = QtWidgets.QVBoxLayout(self)
+        side = "Dr" if self.amount > 0 else "Cr"
+        layout.addWidget(flowing(QtWidgets.QLabel(
+            f"<b>{party}</b> &nbsp; {money(abs(self.amount))} {side} on this "
+            f"line.")))
+
+        self._open = acc.open_bills(self.ledger_id, as_at=as_at)
+        # Only bills running the OTHER way can be settled by this line: a
+        # receipt reduces what is owed. One running the same way would be
+        # this line adding to a bill it is not part of.
+        if not self._open.empty:
+            self._open = self._open[
+                self._open["Signed"] * self.amount < 0].reset_index(drop=True)
+
+        self.table = QtWidgets.QTableWidget(len(self._open), 4)
+        self.table.setHorizontalHeaderLabels(["Reference", "Due", "Pending",
+                                              "Settle now"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        prefilled = {str(b.get("bill_ref")): b for b in (existing or [])
+                     if b.get("kind") == "against"}
+        for row in range(len(self._open)):
+            bill = self._open.iloc[row]
+            for col, text in ((0, str(bill["Ref"])),
+                              (1, str(bill["Due"]) or "—"),
+                              (2, f"{float(bill['Pending']):,.2f}")):
+                item = QtWidgets.QTableWidgetItem(text)
+                item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled
+                              | QtCore.Qt.ItemFlag.ItemIsSelectable)
+                if col == 2:
+                    item.setTextAlignment(QtCore.Qt.AlignRight
+                                          | QtCore.Qt.AlignVCenter)
+                    item.setFont(mono_font())
+                self.table.setItem(row, col, item)
+            was = prefilled.get(str(bill["Ref"]))
+            settle = QtWidgets.QTableWidgetItem(
+                f"{abs(float(was['signed'])):,.2f}" if was else "")
+            settle.setTextAlignment(QtCore.Qt.AlignRight
+                                    | QtCore.Qt.AlignVCenter)
+            settle.setFont(mono_font())
+            self.table.setItem(row, 3, settle)
+        self.table.itemChanged.connect(self._retotal)
+        if len(self._open):
+            layout.addWidget(QtWidgets.QLabel("Open bills — type what this "
+                                              "line settles against each:"))
+            layout.addWidget(self.table, 1)
+        else:
+            self.table.setVisible(False)
+            layout.addWidget(flowing(QtWidgets.QLabel(
+                "This party has no open bills that this line could settle.")))
+
+        new_box = QtWidgets.QGroupBox("Open a new bill")
+        form = QtWidgets.QFormLayout(new_box)
+        was_new = next((b for b in (existing or [])
+                        if b.get("kind") in ("new", "advance")), None)
+        self.new_ref = QtWidgets.QLineEdit(
+            str(was_new["bill_ref"]) if was_new else suggested_ref)
+        self.new_ref.setPlaceholderText("invoice or bill number")
+        self.new_ref.textChanged.connect(self._retotal)
+        form.addRow("Reference", self.new_ref)
+        self.new_due = QtWidgets.QDateEdit()
+        self.new_due.setCalendarPopup(True)
+        self.new_due.setDisplayFormat("dd/MM/yyyy")
+        self.new_due.setSpecialValueText("none")
+        self.new_due.setMinimumDate(QtCore.QDate(1900, 1, 1))
+        if was_new and was_new.get("due_date"):
+            self.new_due.setDate(to_qdate(str(was_new["due_date"])))
+        else:
+            self.new_due.setDate(self.new_due.minimumDate())
+        form.addRow("Due", self.new_due)
+        self.new_amount = QtWidgets.QLineEdit(
+            f"{abs(float(was_new['signed'])):,.2f}" if was_new else "")
+        self.new_amount.setPlaceholderText("leave blank to use whatever is left")
+        self.new_amount.setFont(mono_font())
+        self.new_amount.textChanged.connect(self._retotal)
+        form.addRow("Amount", self.new_amount)
+        layout.addWidget(new_box)
+
+        self.summary = flowing(QtWidgets.QLabel())
+        layout.addWidget(self.summary)
+
+        buttons = QtWidgets.QHBoxLayout()
+        oldest = QtWidgets.QPushButton("Apply to oldest")
+        oldest.setToolTip("Fill the open bills from the oldest down, until "
+                          "this line is used up")
+        oldest.clicked.connect(self._apply_to_oldest)
+        oldest.setEnabled(bool(len(self._open)))
+        buttons.addWidget(oldest)
+        clear = QtWidgets.QPushButton("Clear")
+        clear.clicked.connect(self._clear)
+        buttons.addWidget(clear)
+        buttons.addStretch(1)
+        cancel = QtWidgets.QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        self.ok = QtWidgets.QPushButton("Done")
+        self.ok.setDefault(True)
+        self.ok.clicked.connect(self._accept)
+        buttons.addWidget(self.ok)
+        layout.addLayout(buttons)
+
+        self._retotal()
+
+    # --- the running total ------------------------------------------------ #
+    def _settled(self) -> float:
+        total = 0.0
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 3)
+            total = round(total + parse_amount(item.text() if item else ""), 2)
+        return total
+
+    def _new_amount(self) -> float:
+        return parse_amount(self.new_amount.text())
+
+    def _retotal(self, *_args) -> None:
+        settled = self._settled()
+        named = self._new_amount()
+        # A reference with no amount means "whatever is left", which is the
+        # common case: one invoice, one line, the whole amount.
+        implied = (round(abs(self.amount) - settled, 2)
+                   if self.new_ref.text().strip() and not named else 0.0)
+        used = round(settled + named + max(implied, 0.0), 2)
+        left = round(abs(self.amount) - used, 2)
+
+        if used > abs(self.amount) + 0.005:
+            self.summary.setText(
+                f"Allocated {money(used)}, which is "
+                f"{money(used - abs(self.amount))} more than the line.")
+            tone(self.summary, "bad")
+            self.ok.setEnabled(False)
+            return
+        self.ok.setEnabled(True)
+        if abs(left) <= 0.005:
+            self.summary.setText(f"All {money(abs(self.amount))} allocated.")
+            tone(self.summary, "good")
+        else:
+            self.summary.setText(
+                f"{money(left)} of {money(abs(self.amount))} is not against "
+                f"any bill, and will sit on account.")
+            tone(self.summary, "warn")
+
+    # --- actions ---------------------------------------------------------- #
+    def _apply_to_oldest(self) -> None:
+        left = abs(self.amount) - self._new_amount()
+        for row in range(self.table.rowCount()):
+            pending = abs(float(self._open.iloc[row]["Pending"]))
+            take = round(min(pending, max(left, 0.0)), 2)
+            self.table.item(row, 3).setText(f"{take:,.2f}" if take else "")
+            left = round(left - take, 2)
+        self._retotal()
+
+    def _clear(self) -> None:
+        for row in range(self.table.rowCount()):
+            self.table.item(row, 3).setText("")
+        self.new_ref.clear()
+        self.new_amount.clear()
+        self._retotal()
+
+    def _accept(self) -> None:
+        sign = 1.0 if self.amount > 0 else -1.0
+        out: list[dict] = []
+        for row in range(self.table.rowCount()):
+            take = parse_amount(self.table.item(row, 3).text()
+                                if self.table.item(row, 3) else "")
+            if not take:
+                continue
+            pending = abs(float(self._open.iloc[row]["Pending"]))
+            if take > pending + 0.005:
+                QtWidgets.QMessageBox.warning(
+                    self, "More than the bill",
+                    f"{money(take)} is more than the {money(pending)} left on "
+                    f"{self._open.iloc[row]['Ref']}.")
+                return
+            out.append({"kind": "against",
+                        "bill_ref": str(self._open.iloc[row]["Ref"]),
+                        "signed": round(sign * take, 2), "due_date": ""})
+
+        ref = self.new_ref.text().strip()
+        if ref:
+            named = self._new_amount()
+            if not named:
+                named = round(abs(self.amount) - self._settled(), 2)
+            if named > 0.005:
+                due = self.new_due.date()
+                out.append({
+                    "kind": "new", "bill_ref": ref,
+                    "signed": round(sign * named, 2),
+                    "due_date": ("" if due == self.new_due.minimumDate()
+                                 else from_qdate(due).isoformat())})
+        elif self._new_amount():
+            QtWidgets.QMessageBox.warning(
+                self, "No reference",
+                "Give the new bill a reference, or it could never be settled "
+                "later.")
+            return
+
+        # The remainder is deliberately NOT added here. The data layer
+        # materialises it as an on-account allocation, so there is one place
+        # that decides what unallocated money becomes.
+        self.allocations = out
+        self.accept()
+
+
 class VoucherScreen(QtWidgets.QWidget):
     """The screen you live in: type, date, number, then a Dr/Cr grid."""
 
@@ -816,6 +1038,10 @@ class VoucherScreen(QtWidgets.QWidget):
             0, QtWidgets.QHeaderView.Stretch)
         self.grid.verticalHeader().setVisible(False)
         self.grid.itemChanged.connect(self._recalculate)
+        # Moving between rows changes whether the Bills button means anything,
+        # and nothing else would notice: the cells themselves have not changed.
+        self.grid.currentCellChanged.connect(
+            lambda *_a: self._recalculate())
         layout.addWidget(self.grid, 1)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -827,18 +1053,32 @@ class VoucherScreen(QtWidgets.QWidget):
         create.setToolTip("Create a ledger without leaving this voucher — "
                           "whatever you have typed into the line is kept")
         create.clicked.connect(self.create_ledger)
+        self.bills_button = QtWidgets.QPushButton("Bills…  (Alt+B)")
+        self.bills_button.setToolTip(
+            "Attach this line to a bill — open a new one, or settle open "
+            "ones. Only for ledgers that keep bills.")
+        self.bills_button.clicked.connect(self.edit_bills)
         buttons.addWidget(add)
         buttons.addWidget(remove)
         buttons.addWidget(create)
+        buttons.addWidget(self.bills_button)
         buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        # The totals get a row of their own. Sharing the button row, they put
+        # Voucher Entry's minimum width at 1572px once a fourth button was
+        # added - past the 1400px ceiling the whole app has to fit inside,
+        # and wider than a 1366px laptop screen at the largest text size.
+        totals_row = QtWidgets.QHBoxLayout()
+        totals_row.addStretch(1)
         self.dr_label = QtWidgets.QLabel()
         self.cr_label = QtWidgets.QLabel()
         self.gap_label = QtWidgets.QLabel()
         for widget in (self.dr_label, self.cr_label, self.gap_label):
             apply_mono(widget)
-            buttons.addWidget(widget)
-            buttons.addSpacing(14)
-        layout.addLayout(buttons)
+            totals_row.addWidget(widget)
+            totals_row.addSpacing(14)
+        layout.addLayout(totals_row)
 
         self.notice = QtWidgets.QLabel()
         self.notice.setWordWrap(True)
@@ -878,6 +1118,10 @@ class VoucherScreen(QtWidgets.QWidget):
         shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
         shortcut.activated.connect(self.create_ledger)
 
+        bills_key = QtGui.QShortcut(QtGui.QKeySequence("Alt+B"), self)
+        bills_key.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        bills_key.activated.connect(self.edit_bills)
+
         self.reset()
 
     # --- grid plumbing ------------------------------------------------- #
@@ -890,16 +1134,32 @@ class VoucherScreen(QtWidgets.QWidget):
         completer = combo.completer()
         completer.setFilterMode(QtCore.Qt.MatchContains)
         completer.setCompletionMode(QtWidgets.QCompleter.PopupCompletion)
+        # The row's bill allocations live on its combo, so they travel with
+        # the row when one is inserted or removed above it.
+        combo._bills = []
         combo.currentTextChanged.connect(self._recalculate)
+        # A bill reference belongs to a PARTY. Point the row at somebody else
+        # and the old party's references would be saved against the new one.
+        combo.currentTextChanged.connect(
+            lambda _text, c=combo: self._ledger_swapped(c))
         return combo
 
+    def _ledger_swapped(self, combo) -> None:
+        if getattr(self, "_loading", False):
+            return
+        if getattr(combo, "_bills", []):
+            combo._bills = []
+
     def _add_row(self, ledger: str = "", debit: float = 0.0,
-                 credit: float = 0.0) -> None:
+                 credit: float = 0.0, bills: list[dict] | None = None) -> None:
         row = self.grid.rowCount()
         self.grid.insertRow(row)
         combo = self._ledger_combo()
         if ledger:
             combo.setCurrentText(ledger)
+        # AFTER the name is set, because setting it fires the handler that
+        # discards allocations when the row is pointed at another party.
+        combo._bills = list(bills or [])
         self.grid.setCellWidget(row, 0, combo)
         for col, value in ((1, debit), (2, credit)):
             item = QtWidgets.QTableWidgetItem("" if not value else f"{value:,.2f}")
@@ -928,8 +1188,13 @@ class VoucherScreen(QtWidgets.QWidget):
                 continue
             if name not in self._ledger_ids:
                 continue
+            # The allocations hang off the row's own combo widget, so they
+            # follow the row when one is inserted or removed above it. Keyed
+            # on the row NUMBER they would attach to the wrong line the
+            # moment a row was deleted.
             rows.append({"ledger_id": self._ledger_ids[name],
-                         "debit": debit, "credit": credit})
+                         "debit": debit, "credit": credit,
+                         "bills": list(getattr(combo, "_bills", []))})
         return rows
 
     def _recalculate(self, *_args) -> None:
@@ -953,6 +1218,10 @@ class VoucherScreen(QtWidgets.QWidget):
         # back and the data layer would then refuse the save.
         self.accept_button.setEnabled(balanced and distinct
                                       and not self.editing_voided)
+
+        self.bills_button.setEnabled(
+            not self.editing_voided
+            and self._bill_wise_row(self.grid.currentRow()) is not None)
 
         notes = db.voucher_type_warnings(
             self.type_box.currentText(), rows, self._ledgers)
@@ -1091,8 +1360,65 @@ class VoucherScreen(QtWidgets.QWidget):
         self.grid.setRowCount(0)
         self._loading = False
         for line in lines:
+            # On-account allocations are not re-loaded: the data layer puts
+            # them back from whatever is left unallocated, so carrying them
+            # in would then be counted twice over.
             self._add_row(str(line["ledger_name"]), float(line["debit"]),
-                          float(line["credit"]))
+                          float(line["credit"]),
+                          [b for b in line.get("bills", [])
+                           if b.get("kind") != "on_account"])
+        self._recalculate()
+
+    def _bill_wise_row(self, row: int) -> tuple[int, str] | None:
+        """The ledger on that row, if it keeps bills. Otherwise None."""
+        if row < 0 or row >= self.grid.rowCount():
+            return None
+        combo = self.grid.cellWidget(row, 0)
+        name = combo.currentText().strip() if combo else ""
+        lid = self._ledger_ids.get(name)
+        if lid is None or self._ledgers.empty:
+            return None
+        found = self._ledgers[self._ledgers["id"].astype(int) == int(lid)]
+        if found.empty or not bool(found.iloc[0].get("bill_wise", 0)):
+            return None
+        return int(lid), name
+
+    def edit_bills(self) -> None:
+        """Alt+B: allocate the current line to bills."""
+        row = self.grid.currentRow()
+        found = self._bill_wise_row(row)
+        if found is None:
+            QtWidgets.QMessageBox.information(
+                self, "No bills here",
+                "Put the cursor on a line whose ledger keeps bills — a "
+                "customer or supplier. Bill-wise is a tick on the ledger, on "
+                "the Masters screen.")
+            return
+        lid, name = found
+        combo = self.grid.cellWidget(row, 0)
+        debit = parse_amount(self.grid.item(row, 1).text()
+                             if self.grid.item(row, 1) else "")
+        credit = parse_amount(self.grid.item(row, 2).text()
+                              if self.grid.item(row, 2) else "")
+        amount = round(debit - credit, 2)
+        if not amount:
+            QtWidgets.QMessageBox.information(
+                self, "No amount yet",
+                "Put the amount on the line first — the bills have to add up "
+                "to something.")
+            return
+
+        dialog = BillsDialog(
+            self, party=name, ledger_id=lid, amount=amount,
+            existing=list(getattr(combo, "_bills", [])),
+            # A line that INCREASES what the party owes is raising a bill, so
+            # the voucher's own number is the obvious reference to offer.
+            suggested_ref=(self.number_label.text().removeprefix("No. ").strip()
+                           if not getattr(combo, "_bills", []) else ""),
+            as_at=from_qdate(self.date_edit.date()))
+        if not dialog.exec():
+            return
+        combo._bills = dialog.allocations
         self._recalculate()
 
     def _voucher_label(self) -> str:
@@ -1286,15 +1612,25 @@ class PeriodBar(QtWidgets.QWidget):
     changed = QtCore.Signal()
 
     SINCE = "Since books began"
+    TODAY = "Today"
     CUSTOM = "Custom dates…"
     # Marks the since-books-began entry. The years carry a FinancialYear and
     # Custom carries None, so the three are told apart by what they hold
     # rather than by their position in a list that changes with the data.
     ALL = "all"
+    NOW = "now"
 
-    def __init__(self, with_from: bool = True, parent=None):
+    def __init__(self, with_from: bool = True, today_first: bool = False,
+                 parent=None):
         super().__init__(parent)
         self.with_from = with_from
+        # Opt-in, and only Outstanding asks for it. An ageing report drawn at
+        # the END of the financial year - which is where the year dropdown
+        # lands by default, and a date still in the future - shows every bill
+        # as months overdue and a bill not yet due as long past it. The other
+        # as-at reports keep opening on the current year, which is what was
+        # asked for them: a year named in a dropdown means that whole year.
+        self.today_first = today_first
         # Set while the bar updates its own dates, so that the handlers which
         # watch for YOUR edits do not fire for ours - without it, choosing a
         # year would immediately flip the dropdown to Custom.
@@ -1360,6 +1696,8 @@ class PeriodBar(QtWidgets.QWidget):
         # tickbox: it is one of the periods you can choose, and a row holding
         # both was 1468px wide at the largest text size - wider than the
         # 1400px ceiling the whole app has to fit inside.
+        if self.today_first:
+            self.year_box.addItem(self.TODAY, self.NOW)
         if self.with_from:
             self.year_box.addItem(self.SINCE, self.ALL)
         for year in years:
@@ -1367,6 +1705,8 @@ class PeriodBar(QtWidgets.QWidget):
         self.year_box.addItem(self.CUSTOM, None)
 
         index = self.year_box.findText(wanted) if wanted else -1
+        if index < 0 and self.today_first:
+            index = self.year_box.findText(self.TODAY)
         if index < 0:
             current = acc.current_financial_year()
             index = max(0, self.year_box.findText(f"FY {current.label}"))
@@ -1398,7 +1738,11 @@ class PeriodBar(QtWidgets.QWidget):
             self.changed.emit()
             return
         self._quiet = True
-        if chosen == self.ALL:
+        if chosen == self.NOW:
+            if self.with_from:
+                self.from_edit.setEnabled(False)
+            self.to_edit.setDate(to_qdate(date.today()))
+        elif chosen == self.ALL:
             # No start date at all, so the From editor has nothing to say.
             if self.with_from:
                 self.from_edit.setEnabled(False)
@@ -1877,6 +2221,177 @@ class BalanceSheetScreen(QtWidgets.QWidget):
             self.status.setText("The two sides do not agree — that should be "
                                 "impossible, please report it.")
             tone(self.status, "bad")
+
+
+class OutstandingScreen(QtWidgets.QWidget):
+    """Who owes what, how overdue it is, and anything sitting unallocated."""
+
+    open_voucher = QtCore.Signal(int)
+
+    # Shown on screen and in the printed report; the rest of what
+    # acc.outstanding() returns is for reconciling, not for reading.
+    BILL_COLUMNS = ["Party", "Ref", "Date", "Due", "Amount", "Pending",
+                    "Age", "Bucket"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(heading("Outstanding"))
+
+        # Opens on TODAY, not on the financial year's closing day: ageing is
+        # measured from the date the report is drawn at, and the year's end is
+        # still in the future for the year in progress.
+        self.period = PeriodBar(with_from=False, today_first=True)
+        self.period.changed.connect(self.refresh)
+        layout.addWidget(self.period)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.addWidget(QtWidgets.QLabel("Age by"))
+        self.age_by = QtWidgets.QComboBox()
+        self.age_by.addItems(list(acc.AGE_BY))
+        self.age_by.setToolTip(
+            "Due date answers 'how late is this?'. Bill date answers 'how "
+            "long have we carried it?'. Bills with no due date age from "
+            "their own date either way.")
+        self.age_by.currentTextChanged.connect(self.refresh)
+        controls.addWidget(self.age_by)
+        controls.addSpacing(18)
+        self.show_side = QtWidgets.QComboBox()
+        self.show_side.addItems(["Receivable and payable", "Receivable only",
+                                 "Payable only"])
+        self.show_side.currentTextChanged.connect(self.refresh)
+        controls.addWidget(self.show_side)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        # Its own row. Sharing the controls row, this one unwrapped mono label
+        # was asking for 760px by itself and put the whole screen's minimum at
+        # 1429px, past the 1400px ceiling - the tables are not the problem,
+        # they scroll. An unwrapped label is almost always what pins a screen
+        # open; see flowing().
+        totals_row = QtWidgets.QHBoxLayout()
+        totals_row.addStretch(1)
+        self.totals = QtWidgets.QLabel()
+        apply_mono(self.totals)
+        totals_row.addWidget(self.totals)
+        layout.addLayout(totals_row)
+
+        self.status = flowing(QtWidgets.QLabel())
+        layout.addWidget(self.status)
+
+        self.table = FrameTable()
+        self.table.doubleClicked.connect(self._open)
+        layout.addWidget(self.table, 2)
+
+        layout.addWidget(flowing(QtWidgets.QLabel(
+            "Double-click a bill to open the voucher that raised it.")))
+
+        self.ageing_label = QtWidgets.QLabel("Ageing")
+        layout.addWidget(self.ageing_label)
+        self.ageing = FrameTable()
+        layout.addWidget(self.ageing, 1)
+
+        self.loose_label = QtWidgets.QLabel("On account, against no bill")
+        layout.addWidget(self.loose_label)
+        self.loose = FrameTable()
+        layout.addWidget(self.loose, 1)
+
+        layout.addWidget(ReportActions(self.report))
+        self._bills = pd.DataFrame()
+        self._shown = pd.DataFrame()
+        self._ageing = pd.DataFrame()
+        self._loose = pd.DataFrame()
+
+    def report(self) -> Report:
+        sections = [ReportSection("Bills outstanding", self._shown,
+                                  ("Amount", "Pending"))]
+        if not self._ageing.empty:
+            sections.append(ReportSection("Ageing", self._ageing,
+                                          ("Receivable", "Payable")))
+        if not self._loose.empty:
+            sections.append(ReportSection("On account, against no bill",
+                                          self._loose, ("Pending",)))
+        return Report(
+            title="Outstanding",
+            period=period_caption(self.period)
+            + f"  ·  aged by {self.age_by.currentText()}"
+            + ("" if self.show_side.currentIndex() == 0
+               else f"  ·  {self.show_side.currentText().lower()}"),
+            sections=sections,
+            # The totals and the warning live in LABELS, not in any table, so
+            # a printed report without them loses the figures that were wanted.
+            notes=[self.totals.text(), self.status.text()])
+
+    def refresh(self) -> None:
+        _, as_at = self.period.range()
+        result = acc.outstanding(as_at=as_at, age_by=self.age_by.currentText())
+        bills, loose = result["bills"], result["on_account"]
+
+        keep = {"Receivable only": "asset", "Payable only": "liability"}.get(
+            self.show_side.currentText())
+        if keep:
+            bills = bills[bills["nature"] == keep] if not bills.empty else bills
+            loose = loose[loose["nature"] == keep] if not loose.empty else loose
+
+        self._bills = bills.reset_index(drop=True)
+        self._shown = (self._bills[self.BILL_COLUMNS] if not bills.empty
+                       else pd.DataFrame(columns=self.BILL_COLUMNS))
+        self.table.load(self._shown, numeric=("Amount", "Pending"))
+
+        self._ageing = (result["ageing"] if not result["ageing"].empty
+                        else pd.DataFrame(columns=["Bucket", "Receivable",
+                                                   "Payable"]))
+        self.ageing.load(self._ageing, numeric=("Receivable", "Payable"))
+        self.ageing_label.setVisible(not self._ageing.empty)
+        self.ageing.setVisible(not self._ageing.empty)
+
+        self._loose = (loose[["Party", "Pending"]].assign(
+            Pending=loose["Pending"].abs().round(2)).reset_index(drop=True)
+            if not loose.empty else pd.DataFrame(columns=["Party", "Pending"]))
+        self.loose.load(self._loose, numeric=("Pending",))
+        self.loose_label.setVisible(not self._loose.empty)
+        self.loose.setVisible(not self._loose.empty)
+
+        totals = result["totals"]
+        self.totals.setText(
+            f"Receivable {money(totals['receivable'])}"
+            f"   Payable {money(totals['payable'])}")
+
+        overdue = (self._bills[self._bills["Age"] > 0]
+                   if not self._bills.empty else self._bills)
+        if self._shown.empty and self._loose.empty:
+            self.status.setText(
+                "No bills outstanding. A bill appears here once a voucher on "
+                "a bill-wise ledger opens a reference — see the Bills button "
+                "on Voucher Entry.")
+            tone(self.status, "muted")
+        elif not overdue.empty:
+            worst = overdue.iloc[0]
+            self.status.setText(
+                f"{len(overdue)} bill(s) overdue, the oldest "
+                f"{int(worst['Age'])} days — {worst['Party']} "
+                f"{worst['Ref']} for {money(float(worst['Pending']))}.")
+            tone(self.status, "bad")
+        else:
+            self.status.setText("Nothing is overdue.")
+            tone(self.status, "good")
+
+        if not self._loose.empty:
+            self.status.setText(
+                self.status.text()
+                + f"  {money(float(self._loose['Pending'].sum()))} is on "
+                f"account against no bill, so nobody can be chased for it.")
+            tone(self.status, "warn")
+
+    def _open(self, index) -> None:
+        if 0 <= index.row() < len(self._bills):
+            ref = self._bills.iloc[index.row()]
+            found = db.get_allocations()
+            found = found[(found["ledger_id"] == int(ref["ledger_id"]))
+                          & (found["bill_ref"] == ref["Ref"])
+                          & (found["kind"].isin(["new", "advance"]))]
+            if not found.empty:
+                self.open_voucher.emit(int(found.iloc[0]["voucher_id"]))
 
 
 class MastersScreen(QtWidgets.QWidget):
@@ -2385,6 +2900,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trial = TrialBalanceScreen()
         self.profit = ProfitLossScreen()
         self.sheet = BalanceSheetScreen()
+        self.outstanding = OutstandingScreen()
         self.masters = MastersScreen()
         self.company = CompanyScreen()
 
@@ -2395,6 +2911,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("Trial Balance", self.trial),
             ("Profit && Loss", self.profit),
             ("Balance Sheet", self.sheet),
+            ("Outstanding", self.outstanding),
             ("Masters", self.masters),
             ("Company", self.company),
         ]
@@ -2406,6 +2923,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.masters.changed.connect(self.refresh_all)
         self.daybook.open_voucher.connect(self._alter)
         self.ledger.open_voucher.connect(self._alter)
+        self.outstanding.open_voucher.connect(self._alter)
         # The company name is in the title bar and its currency symbol is in
         # every figure, so saving it has to reach the whole window.
         self.company.changed.connect(self._company_changed)

@@ -764,6 +764,36 @@ def _migrate(conn) -> None:
             )
             """)
 
+    # Lines posted to a party BEFORE bills existed carry no allocations, so
+    # the outstanding report would show nothing while the balance sheet showed
+    # the party owing money - silent under-reporting, the worst of the
+    # options. Backfilled as ON ACCOUNT, which is the truth: the money is on
+    # their account and against no bill. The report then says so, and says
+    # nobody can be chased for it, which is the prompt to go and allocate it.
+    #
+    # Keyed on its own marker rather than on the column being added, because
+    # the column may already have been added by an earlier version of this
+    # function that did not backfill.
+    done = conn.execute("SELECT value FROM settings WHERE key = ?",
+                        (BACKFILL_KEY,)).fetchone()
+    if not (done and done["value"]):
+        conn.execute(
+            """
+            INSERT INTO bill_allocations (line_id, ledger_id, bill_ref, kind,
+                                          signed, due_date, alloc_order)
+            SELECT vl.id, vl.ledger_id, '', 'on_account',
+                   ROUND(vl.debit - vl.credit, 2), '', 0
+              FROM voucher_lines vl
+              JOIN ledgers l ON l.id = vl.ledger_id
+             WHERE l.bill_wise = 1
+               AND ROUND(vl.debit - vl.credit, 2) <> 0
+               AND NOT EXISTS (SELECT 1 FROM bill_allocations ba
+                                WHERE ba.line_id = vl.id)
+            """)
+        conn.execute("INSERT INTO settings (key, value) VALUES (?, '1')"
+                     " ON CONFLICT(key) DO UPDATE SET value = '1'",
+                     (BACKFILL_KEY,))
+
 
 def init_db() -> None:
     """Create the schema and the reserved masters. Safe to call repeatedly."""
@@ -951,6 +981,8 @@ def ledger_id(name: str) -> int:
 
 
 BILL_WISE_GROUPS = ("Sundry Debtors", "Sundry Creditors")
+# Marks that party lines posted before bills existed have been accounted for.
+BACKFILL_KEY = "bills_backfilled"
 
 
 def defaults_to_bill_wise(group: str) -> bool:

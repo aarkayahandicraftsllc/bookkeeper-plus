@@ -65,10 +65,10 @@ app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 window = desktop.MainWindow()
 
 print("\n1) The window opens with every screen")
-check("eight screens", window.stack.count(), 8)
+check("nine screens", window.stack.count(), 9)
 check("screen names", [name.replace("&&", "&") for name, _ in window.screens],
       ["Voucher Entry", "Day Book", "Ledger", "Trial Balance", "Profit & Loss",
-       "Balance Sheet", "Masters", "Company"])
+       "Balance Sheet", "Outstanding", "Masters", "Company"])
 check("starts on voucher entry", window.stack.currentIndex(), 0)
 check("title names the company and the app",
       "Bookkeeper Plus" in window.windowTitle(), True)
@@ -223,8 +223,10 @@ menu_letters = {m.title().split("&")[1][0].upper()
                 if "&" in m.title()}
 shortcuts = [s for s in voucher.findChildren(QtGui.QShortcut)
              if s.key().toString().startswith("Alt+")]
-check("the voucher screen has one Alt shortcut", len(shortcuts), 1)
-check("and it is Alt+L", shortcuts[0].key().toString(), "Alt+L")
+keys = sorted(s.key().toString() for s in shortcuts)
+check("the voucher screen's Alt shortcuts", keys, ["Alt+B", "Alt+L"])
+check("none of them is a letter the menu bar owns",
+      [k for k in keys if k.rsplit("+", 1)[1].upper() in menu_mnemonics], [])
 check("L is not claimed by a menu", "L" in menu_letters, False)
 check("C still is, which is what broke it", "C" in menu_letters, True)
 labels = [b.text() for b in voucher.findChildren(QtWidgets.QPushButton)]
@@ -517,9 +519,18 @@ for index in range(len(window.screens)):
     window.show_screen(index)
     QtWidgets.QApplication.processEvents()
     screen = window.screens[index][1]
-    fits = window.width() >= screen.minimumSizeHint().width()
+    # Against the DISPLAY as well, because the window is clamped to it: this
+    # offscreen one is 800px wide, so a window can never be wider than that
+    # here however much a screen asks for. The real guarantee is the
+    # WIDTH_CEILING check above - this one catches a screen asking for more
+    # than the window gives it on a display that could have obliged.
+    #
+    # It used to pass without the clamp only because Voucher Entry demanded
+    # 1327px and dragged the whole window out to that width. Narrowing the
+    # screens made the window smaller and the artefact visible.
+    want = min(screen.minimumSizeHint().width(), avail.width())
     check(f"{window.screens[index][0]} fits the window at largest size",
-          fits, True)
+          window.width() >= want, True)
 
 # The voucher-type description is the one label deliberately left UNWRAPPED,
 # so it is the one that can pin the window open. Still at the largest size
@@ -1092,11 +1103,23 @@ check("the printed page groups the thousands",
 
 # The input screens are not reports, and must say so rather than printing
 # something arbitrary.
-for index in (0, 6, 7):
+# Voucher Entry, Masters and Company hold INPUT, so there is nothing to
+# print. Outstanding moved in at index 6 and IS a report, so the input
+# screens are now 0, 7 and 8.
+for index in (0, 7, 8):
     window.show_screen(index)
     settle()
-    check(f"screen {index} is not offered as a report",
+    check(f"screen {index} ({window.screens[index][0]}) is not a report",
           window.current_report(), None)
+window.show_screen(6)
+settle()
+check("but Outstanding is", window.current_report().title, "Outstanding")
+# Back to an input screen BEFORE the calls below. They are here to prove
+# print/export are harmless when there is nothing to print - and on a report
+# screen print_current() opens the print preview, which blocks for ever with
+# nobody to dismiss it.
+window.show_screen(7)
+settle()
 window.print_current()          # must not raise, and must not print
 window.export_current()
 check("asking anyway leaves a message instead of a document",
@@ -1303,6 +1326,137 @@ check("plain Alt+P does not switch type",
 
 window.hide()
 app.processEvents()
+
+print("\n25) Bills: allocating a line, and the Outstanding screen")
+db.use_company(TMP)
+db.add_ledger("Chase Me Ltd", "Sundry Debtors")
+window.masters.refresh()
+voucher = window.voucher
+voucher.reset()
+settle()
+
+check("a party ledger comes out bill-wise",
+      bool(db.get_ledgers().set_index("name").loc["Chase Me Ltd", "bill_wise"]),
+      True)
+
+# The Bills button only means anything on a line that keeps bills.
+set_row(voucher, 0, "Chase Me Ltd", debit=50_000)
+set_row(voucher, 1, "Sales", credit=50_000)
+voucher.grid.setCurrentCell(0, 0)
+settle()
+check("Bills is offered on the party line", voucher.bills_button.isEnabled(), True)
+voucher.grid.setCurrentCell(1, 0)
+settle()
+check("and not on the Sales line", voucher.bills_button.isEnabled(), False)
+voucher.grid.setCurrentCell(0, 0)
+settle()
+
+# Raising a bill. The dialog is built directly - exec() would block - and the
+# voucher number is offered as the reference.
+dialog = desktop.BillsDialog(
+    voucher, party="Chase Me Ltd", ledger_id=db.ledger_id("Chase Me Ltd"),
+    amount=50_000.0, suggested_ref="7")
+check("a new bill is offered the voucher's own number",
+      dialog.new_ref.text(), "7")
+check("with the whole line allocated to it",
+      "All" in dialog.summary.text(), True)
+dialog._accept()
+check("which yields one new-reference allocation",
+      [(a["kind"], a["bill_ref"], a["signed"]) for a in dialog.allocations],
+      [("new", "7", 50_000.0)])
+
+voucher.grid.cellWidget(0, 0)._bills = dialog.allocations
+check("and the row carries them into row_values",
+      voucher.row_values()[0]["bills"], dialog.allocations)
+window._accept()
+settle()
+check("posting puts the bill on the outstanding report",
+      float(acc.outstanding()["bills"].set_index("Ref").loc["7", "Pending"]),
+      50_000.0)
+
+# Settling it. Apply to oldest fills the open bills from the top.
+voucher.reset()
+voucher.type_box.setCurrentText("Receipt")
+set_row(voucher, 0, "Cash", debit=20_000)
+set_row(voucher, 1, "Chase Me Ltd", credit=20_000)
+settle()
+dialog = desktop.BillsDialog(
+    voucher, party="Chase Me Ltd", ledger_id=db.ledger_id("Chase Me Ltd"),
+    amount=-20_000.0)
+check("the open bill is offered to settle against", list(dialog._open["Ref"]),
+      ["7"])
+check("nothing allocated to begin with",
+      "on account" in dialog.summary.text(), True)
+dialog._apply_to_oldest()
+check("apply to oldest allocates the lot", "All" in dialog.summary.text(), True)
+dialog._accept()
+check("as an against-reference running the other way",
+      [(a["kind"], a["bill_ref"], a["signed"]) for a in dialog.allocations],
+      [("against", "7", -20_000.0)])
+voucher.grid.cellWidget(1, 0)._bills = dialog.allocations
+window._accept()
+settle()
+check("so the bill is part-settled",
+      float(acc.outstanding()["bills"].set_index("Ref").loc["7", "Pending"]),
+      30_000.0)
+
+# Over-allocating is refused by the dialog, before the data layer sees it.
+dialog = desktop.BillsDialog(
+    voucher, party="Chase Me Ltd", ledger_id=db.ledger_id("Chase Me Ltd"),
+    amount=-5_000.0)
+dialog.new_ref.setText("TOO-MUCH")
+dialog.new_amount.setText("9000")
+settle()
+check("allocating more than the line disables Done",
+      dialog.ok.isEnabled(), False)
+check("and says by how much", "more than the line" in dialog.summary.text(),
+      True)
+
+# A reference belongs to a PARTY, so re-pointing the row must drop it.
+voucher.reset()
+set_row(voucher, 0, "Chase Me Ltd", debit=1_000)
+combo = voucher.grid.cellWidget(0, 0)
+combo._bills = [{"kind": "new", "bill_ref": "KEEP", "signed": 1_000.0,
+                 "due_date": ""}]
+set_row(voucher, 0, "Cash", debit=1_000)
+settle()
+check("pointing the row at another ledger drops its bill references",
+      getattr(combo, "_bills", []), [])
+voucher.reset()
+
+# --- the Outstanding screen -------------------------------------------- #
+screen = window.outstanding
+screen.refresh()
+settle()
+check("Outstanding opens on today, not the year's closing day",
+      screen.period.year_box.currentText(), "Today")
+check("which is what it ages against", screen.period.range()[1], date.today())
+check("the bill is listed", "7" in list(screen._shown["Ref"]), True)
+check("the ageing summary adds up to the receivables shown",
+      round(float(screen._ageing["Receivable"].sum()), 2),
+      round(float(screen._shown[
+          screen._shown["Party"] == "Chase Me Ltd"]["Pending"].sum()), 2))
+
+screen.age_by.setCurrentText("bill date")
+settle()
+check("the ageing basis is named in the printed report",
+      "bill date" in screen.report().period, True)
+screen.age_by.setCurrentText("due date")
+settle()
+
+screen.show_side.setCurrentText("Payable only")
+settle()
+check("filtering to payables hides a receivable", len(screen._shown), 0)
+check("and the filter is named on the report",
+      "payable only" in screen.report().period, True)
+screen.show_side.setCurrentText("Receivable and payable")
+settle()
+
+report = screen.report()
+check("it prints as a report with its tables",
+      [s.heading for s in report.sections][:1], ["Bills outstanding"])
+check("and carries the totals, which live in a label not a table",
+      any("Receivable" in n for n in report.notes), True)
 
 # The real data folder must be untouched by any of this.
 check("the suite wrote only into its sandbox",
