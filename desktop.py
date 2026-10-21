@@ -88,6 +88,20 @@ def money(value: float) -> str:
 # books' own format, so a column named any of these is formatted there.
 # `Due` is the Outstanding report's due date, which is a date like any other.
 DATE_COLUMNS = ("Date", "Due")
+# Columns whose width is settled by WHAT THEY HOLD rather than by how much
+# there is of it: a date, a voucher type, a voucher number, a status word.
+# Those are sized to their contents; every other text column holds a name or
+# a list of them, of no fixed length, and shares the table's spare width
+# instead of forcing the table wider than the window.
+#
+# Declared rather than guessed, because width cannot tell the two apart - in
+# a book of short ledger names a date needs ten characters and a particulars
+# line eleven. Add a column here only if its content has a known shape.
+# `Balance` is here, not in a `numeric` tuple, because on screen it is TEXT:
+# the ledger carries "102,984.50 Dr", a figure with its side attached. Known
+# shape all the same.
+NARROW_COLUMNS = DATE_COLUMNS + ("Vch Type", "Vch No", "Status", "Balance")
+
 
 
 def shown_dates(frame: pd.DataFrame) -> pd.DataFrame:
@@ -135,19 +149,31 @@ def squeeze(text: str) -> str:
     return "".join((text or "").split())
 
 
+def read_amount(text: str) -> float | None:
+    """The figure a cell holds, or None if it does not hold one.
+
+    Kept apart from `parse_amount`, which answers 0.0 both for "empty" and
+    for "nonsense". That is right for adding a column up and wrong for
+    deciding whether to tidy a cell: **0.00 is a figure and "abc" is not**,
+    and only one of them should be rewritten.
+    """
+    cleaned = squeeze(text).replace(",", "")
+    if not cleaned:
+        return None
+    try:
+        return round(float(cleaned), 2)
+    except ValueError:
+        return None
+
+
 def parse_amount(text: str) -> float:
     """Read an amount typed or pasted, with or without separators.
 
     Blank means zero. So, still, does anything unreadable - see `squeeze` for
     what that costs and why whitespace in particular is no longer unreadable.
     """
-    cleaned = squeeze(text).replace(",", "")
-    if not cleaned:
-        return 0.0
-    try:
-        return round(float(cleaned), 2)
-    except ValueError:
-        return 0.0
+    amount = read_amount(text)
+    return 0.0 if amount is None else amount
 
 
 # --------------------------------------------------------------------------- #
@@ -288,6 +314,13 @@ class FrameTable(QtWidgets.QTableWidget):
                     # Case-folded, or ASCII puts every capital before every
                     # lower-case letter and the order looks arbitrary.
                     item = _Cell(text, text.casefold())
+                    # A stretched column can be narrower than its contents,
+                    # and Qt elides what does not fit. The tooltip is what
+                    # keeps the full text reachable - "Cash / Deepa Gupta /
+                    # ..." must not become unrecoverable because the window
+                    # is narrow.
+                    if text:
+                        item.setToolTip(text)
                 if (bold_last and row == len(frame) - 1) or row in headings:
                     font = item.font()
                     font.setBold(True)
@@ -309,13 +342,12 @@ class FrameTable(QtWidgets.QTableWidget):
         header = self.horizontalHeader()
         header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         if len(frame.columns):
-            # One column takes the slack, and it has to be the one with the
-            # most to say. This used to pick the FIRST non-numeric column,
-            # which on the Day Book and the Ledger is `Date` - so a fixed
-            # ten-character date was handed 600px of stretch while the ledger
-            # names beside it were squeezed to fit. Measured in characters,
-            # which is enough to choose between columns; the actual widths
-            # are still Qt's.
+            # The columns with a lot to say SHARE the slack; the rest are
+            # sized to their contents, which for a date, a voucher type or an
+            # amount is a known and modest width.
+            #
+            # Measured in characters, which is enough to choose between
+            # columns; the actual widths are still Qt's.
             def room_for(index: int) -> int:
                 column = frame.columns[index]
                 if column in numeric:
@@ -323,9 +355,23 @@ class FrameTable(QtWidgets.QTableWidget):
                 lengths = [len(str(v)) for v in frame[column]]
                 return max(lengths + [len(str(column))])
 
-            header.setSectionResizeMode(
-                max(range(len(frame.columns)), key=room_for),
-                QtWidgets.QHeaderView.Stretch)
+            # WHICH columns flex is decided by their SHAPE, not by how wide
+            # they happen to be in these books. Width cannot tell them
+            # apart: in a book of short ledger names `Date` needs 10
+            # characters and `Particulars` 11, so any "stretch the wide
+            # ones" rule hands a ten-character date the slack - the very bug
+            # this code was written to fix. A date, a voucher type and a
+            # voucher number have a known shape; a ledger name, a list of
+            # them, or a particulars line does not.
+            flexible = [index for index, column in enumerate(frame.columns)
+                        if str(column) not in numeric
+                        and str(column) not in NARROW_COLUMNS]
+            # Nothing but fields of known width: give the slack to the widest
+            # rather than leave a gap down the right-hand side.
+            for index in flexible or [max(range(len(frame.columns)),
+                                          key=room_for)]:
+                header.setSectionResizeMode(
+                    index, QtWidgets.QHeaderView.Stretch)
 
 
 def mono_font() -> QtGui.QFont:
@@ -500,11 +546,14 @@ class Report:
     period: str                       # "as at 31/03/2027", "01/04 to 31/03"
     sections: list[ReportSection]
     notes: list[str] = field(default_factory=list)
-    # A TWO-SIDED statement: the sections are taken in pairs and written left
-    # and right on ONE sheet, which is how a balance sheet is read. Without
-    # this each side became a sheet of its own and the reader had to hold one
-    # in their head while looking at the other.
-    side_by_side: bool = False
+    # A TWO-SIDED statement - a balance sheet. Its sections are the two sides
+    # of one document rather than separate tables, so they are written onto
+    # ONE sheet, stacked, in the shape of the template the user supplied
+    # (2026-10-21). Without this each side became a sheet of its own and the
+    # reader had to hold one in their head while looking at the other.
+    # Named for what it IS, not for a layout: it was `side_by_side` while the
+    # sides were written left and right, and kept that name for about a day.
+    two_sided: bool = False
     # Each section's own total, by heading. Needed because the Amount column
     # cannot always simply be summed: the detailed balance sheet carries a
     # heading's total AND the accounts beneath it, so a SUM() doubles the side.
@@ -746,8 +795,8 @@ def _export_csv(report: Report, target: Path) -> None:
     with open(target, "w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle)
         writer.writerows(lines)
-        if report.side_by_side:
-            _csv_sides(writer, report)
+        if report.two_sided:
+            _csv_statement(writer, report)
             return
         for section in report.sections:
             if section.heading:
@@ -764,149 +813,301 @@ def _export_csv(report: Report, target: Path) -> None:
                 writer.writerow([note])
 
 
-# Column widths for the two-sided sheet: a ledger name, a figure, a gutter.
-_SIDE_WIDTHS = {"A": 38, "B": 16, "C": 3, "D": 38, "E": 16}
+# --------------------------------------------------------------------------- #
+# the look of an exported workbook
+# --------------------------------------------------------------------------- #
+# Taken from the template the user supplied 2026-10-21
+# (Downloads/Balance-Sheet-Template.xlsx): a narrow gutter, one wide column of
+# labels indented by depth, figures to the right, gridlines off, blue
+# headings. Declared here so every sheet of every report looks like one
+# document - the user asked for the balance sheet "in this format and
+# similarly other reports with similar header".
+EXCEL_FACE = "Open Sans"      # the template's face; Excel substitutes if absent
+EXCEL_PT = 10
+EXCEL_BLUE = "FF3271D2"       # headings, and a statement's column header
+EXCEL_COVER_BLUE = "FF4472C4"  # the cover page's own larger title
+EXCEL_INK = "FF132E57"        # the darker navy, for secondary headings
+EXCEL_GREY = "FF666666"
+
+# A gutter, the labels, the figures. The template's own widths, with the
+# figure column widened because our figures carry two decimals.
+_STATEMENT_WIDTHS = {"A": 9.1, "B": 37.7, "C": 16.0}
 
 
 def _cell_text(value) -> str:
     return "" if pd.isna(value) else str(value)
 
 
-def _export_excel_sides(report: Report, target: Path) -> None:
-    """A two-sided statement on ONE sheet, laid out the way it is read.
+# Two decimals and a thousands separator, wherever money is written to a
+# spreadsheet (user asked 2026-10-21: "the numbers in all the excel outputs
+# should have 2 decimal places and 1000 seperater"). Declared once because
+# both export layouts use it.
+#
+# A NUMBER FORMAT, not formatted text - which is what lets this sit happily
+# with the older rule that a spreadsheet keeps its figures as numbers. The
+# cell still holds the float, so the column can be summed and pivoted on
+# arrival; only its display changes.
+EXCEL_MONEY = "#,##0.00"
 
-    Asked for 2026-10-20: "balancesheet export format need to be more
-    profession not in 2 seperate sheets, it should be in one sheet". So the
-    sections are taken in pairs, left beside right, under one title block,
-    each side ruled off and totalled.
 
-    Figures stay NUMBERS with a format applied, never formatted text - a
-    column of "1,234.00" strings is a spreadsheet you repair before you can
-    use it, and that principle does not change because the layout got
-    smarter.
+def _excel_width(value, money: bool) -> int:
+    """How wide this value prints, which is not how wide it is stored.
+
+    A money column sized for `1234.5` is too narrow for `1,234.50`, and Excel
+    answers a column that is too narrow with `#####` - so the width has to be
+    measured on the formatted text, not the raw float.
+    """
+    if money and isinstance(value, (int, float)) and not pd.isna(value):
+        return len(f"{float(value):,.2f}")
+    return len(_cell_text(value))
+
+
+def _excel_look(cell, *, bold=False, size=EXCEL_PT, colour=None,
+                italic=False, underline=None):
+    """One place that knows the workbook's face, so no sheet drifts from it."""
+    from openpyxl.styles import Font
+
+    cell.font = Font(name=EXCEL_FACE, size=size, bold=bold, italic=italic,
+                     underline=underline, color=colour)
+    return cell
+
+
+def _excel_title_block(sheet, report: Report, column: int = 2,
+                       title: str | None = None) -> int:
+    """Who, what and when, at the head of a sheet. Returns the next free row.
+
+    The same three lines on every exported report, which is what was asked
+    for: the balance sheet in the template's format "and similarly other
+    reports with similar header". The company comes first, because a
+    statement that does not say whose books it is cannot be filed.
+
+    ``title`` overrides the report's own, so a report written a sheet per
+    section can name the section there instead of spending a row on it.
+    """
+    _excel_look(sheet.cell(row=2, column=column,
+                           value=db.company_display_name()),
+                bold=True, size=11, colour=EXCEL_INK)
+    _excel_look(sheet.cell(row=3, column=column,
+                           value=title if title is not None else report.title),
+                bold=True, size=14, colour=EXCEL_BLUE)
+    _excel_look(sheet.cell(row=4, column=column, value=report.period),
+                italic=True, size=9, colour=EXCEL_GREY)
+    return 6
+
+
+def _excel_cover(book, report: Report, sheets: list[str]) -> None:
+    """The template's cover page: the title, then a list of what is inside.
+
+    Inserted FIRST so it is what opens. The contents are real internal
+    hyperlinks - a list of sheet names you cannot click is decoration.
+    """
+    from openpyxl.styles import Border, Side
+
+    cover = book.create_sheet("Cover Page", 0)
+    cover.sheet_view.showGridLines = False
+    for column, width in (("A", 4.7), ("B", 4.9), ("C", 36.7), ("D", 10.7)):
+        cover.column_dimensions[column].width = width
+
+    _excel_look(cover.cell(row=11, column=3, value=report.title),
+                bold=True, size=20, colour=EXCEL_COVER_BLUE)
+    _excel_look(cover.cell(row=12, column=3,
+                           value=db.company_display_name()),
+                bold=True, size=11, colour=EXCEL_INK)
+    _excel_look(cover.cell(row=13, column=3, value=report.period),
+                italic=True, size=9, colour=EXCEL_GREY)
+
+    contents = _excel_look(cover.cell(row=15, column=3,
+                                      value="Table of Contents"),
+                           bold=True, size=14, colour=EXCEL_INK)
+    contents.border = Border(bottom=Side(style="thin", color=EXCEL_INK))
+    for offset, name in enumerate(sheets):
+        cell = _excel_look(cover.cell(row=17 + offset, column=3, value=name),
+                           size=12, colour=EXCEL_BLUE, underline="single")
+        # Quoted: a sheet name containing a space is not a bare reference.
+        cell.hyperlink = f"#'{name}'!A1"
+
+
+# What a statement line is: a side header, a group, an account, or the total
+# of the group above it. `depth` doubles as the Excel indent.
+_TOTAL = "total"
+
+
+def _statement_rows(section: ReportSection) -> list[tuple]:
+    """A side of a statement as (depth, label, figure) in reading order.
+
+    The frame carries a heading and - in the detailed form - the accounts
+    beneath it, told apart by `acc.DETAIL_INDENT`. The template writes that
+    as an indented heading, its accounts indented again, and the heading's
+    figure moved to a "Total ..." line BELOW them, which is how a statement
+    is read. It also stops the figure column double-counting on the way out,
+    since the heading itself no longer carries one.
+
+    A heading with nothing under it keeps its figure: that is every line of
+    the summary form, and in the detailed form it is the figures the
+    statement works out for itself (Profit & Loss A/c, the opening
+    difference), which have no accounts to list.
+    """
+    entries = [(_cell_text(name), value)
+               for name, value in zip(section.frame.iloc[:, 0],
+                                      section.frame.iloc[:, 1])]
+    rows: list[tuple] = []
+    position = 0
+    while position < len(entries):
+        name, value = entries[position]
+        if name.startswith(acc.DETAIL_INDENT):
+            # An indented line with no heading above it; kept rather than
+            # dropped, because dropping a figure is never the better bug.
+            rows.append((2, name.strip(), value))
+            position += 1
+            continue
+        ahead = position + 1
+        under = []
+        while ahead < len(entries) and \
+                entries[ahead][0].startswith(acc.DETAIL_INDENT):
+            under.append(entries[ahead])
+            ahead += 1
+        if under:
+            rows.append((1, name.strip(), None))
+            for label, figure in under:
+                rows.append((2, label.strip(), figure))
+            rows.append((_TOTAL, name.strip(), value))
+        else:
+            rows.append((1, name.strip(), value))
+        position = ahead
+    return rows
+
+
+def _statement_order(report: Report) -> list[ReportSection]:
+    """The sides in the order a statement is read: ASSETS first.
+
+    The report's own order is the ON-SCREEN one, liabilities on the left,
+    and is deliberately left alone - the screen and the printed page keep
+    the arrangement they already have. Shared by both export formats so the
+    spreadsheet and the CSV cannot end up describing the statement
+    differently. `sorted` is stable, so a section that is neither side holds
+    its place.
+    """
+    return sorted(report.sections,
+                  key=lambda section:
+                  0 if section.heading.lower().startswith("asset") else 1)
+
+
+def _export_excel_statement(report: Report, target: Path) -> None:
+    """A two-sided statement laid out the way the supplied template lays one.
+
+    Asked for 2026-10-21: "i want balance sheet output in this format",
+    pointing at Balance-Sheet-Template.xlsx. The sides are STACKED - each a
+    block headed by its name, groups indented under it, accounts indented
+    again, the side totalled under a thin rule with a double rule below.
+    This REPLACES the side-by-side layout asked for on 2026-10-20; the user
+    was shown both and chose the template's shape.
+
+    Figures stay NUMBERS with a format applied, never formatted text. Totals
+    are written as VALUES rather than SUM() formulas: a formula openpyxl
+    writes carries no cached result, so anything reading the file without
+    recalculating - pandas, a preview pane, an import into Sheets - would
+    find a blank where the total belongs.
     """
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.styles import Alignment, Border, Side
 
     book = Workbook()
     sheet = book.active
     sheet.title = (re.sub(r"[\[\]:*?/\\]", " ", report.title)[:31].strip()
                    or "Report")
-
-    rule = Side(style="thin", color="FF999999")
-    heavy = Side(style="medium", color="FF333333")
-    band = PatternFill("solid", fgColor="FFF2F2F2")
-    money = "#,##0.00"
-    right = Alignment(horizontal="right")
-
-    for column, width in _SIDE_WIDTHS.items():
+    sheet.sheet_view.showGridLines = False
+    for column, width in _STATEMENT_WIDTHS.items():
         sheet.column_dimensions[column].width = width
 
-    # --- who, what, when, centred over the whole statement ---
-    for row, (text, font) in enumerate((
-            (db.company_display_name(), Font(bold=True, size=14)),
-            (report.title, Font(bold=True, size=12)),
-            (report.period, Font(italic=True, color="FF666666"))), start=1):
-        sheet.merge_cells(start_row=row, start_column=1,
-                          end_row=row, end_column=5)
-        cell = sheet.cell(row=row, column=1, value=text)
-        cell.font = font
-        cell.alignment = Alignment(horizontal="center")
+    thin = Side(style="thin", color=EXCEL_INK)
+    double = Side(style="double", color=EXCEL_INK)
 
-    at = 5
-    for first in range(0, len(report.sections), 2):
-        pair = report.sections[first:first + 2]
-        left = pair[0]
-        other = pair[1] if len(pair) > 1 else None
+    at = _excel_title_block(sheet, report)
+    # The figure column says what the figures are, the way the template's
+    # year headers do. Only the DATE part: a period can carry a qualifier
+    # after a "·" ("accounts shown under each heading"), which belongs in
+    # the title block above and would run three columns wide here.
+    header = _excel_look(sheet.cell(
+        row=at - 1, column=3,
+        value=report.period.split("·")[0].strip().capitalize()),
+        bold=True, colour=EXCEL_BLUE)
+    header.alignment = Alignment(horizontal="right")
 
-        for column, section in ((1, left), (4, other)):
-            if section is None:
-                continue
-            head = sheet.cell(row=at, column=column,
-                              value=section.heading or "Particulars")
-            amount = sheet.cell(row=at, column=column + 1, value="Amount")
-            for cell in (head, amount):
-                cell.font = Font(bold=True)
-                cell.fill = band
-                cell.border = Border(bottom=heavy)
-            amount.alignment = right
+    for section in _statement_order(report):
+        _excel_look(sheet.cell(row=at, column=2,
+                               value=section.heading or "Particulars"),
+                    bold=True, colour=EXCEL_INK)
+        at += 1
+        last_account = None
+        for depth, label, value in _statement_rows(section):
+            if depth == _TOTAL:
+                # Ruled off from the accounts it totals.
+                if last_account is not None:
+                    for column in (2, 3):
+                        sheet.cell(row=last_account,
+                                   column=column).border = Border(bottom=thin)
+                name = _excel_look(sheet.cell(row=at, column=2,
+                                              value=f"Total {label}"))
+                name.alignment = Alignment(indent=1)
+                figure = _excel_look(sheet.cell(row=at, column=3, value=value))
+                figure.number_format = EXCEL_MONEY
+                last_account = None
+            else:
+                name = _excel_look(sheet.cell(row=at, column=2, value=label))
+                name.alignment = Alignment(indent=depth)
+                if value is not None and not pd.isna(value):
+                    figure = _excel_look(sheet.cell(row=at, column=3,
+                                                    value=float(value)))
+                    figure.number_format = EXCEL_MONEY
+                last_account = at if depth == 2 else last_account
+            at += 1
 
-        rows = max(len(left.frame),
-                   0 if other is None else len(other.frame))
-        for offset in range(rows):
-            for column, section in ((1, left), (4, other)):
-                if section is None or offset >= len(section.frame):
-                    continue
-                particular = _cell_text(section.frame.iloc[offset, 0])
-                value = section.frame.iloc[offset, 1]
-                # The detailed balance sheet indents its accounts with spaces.
-                # Excel has a real indent, which survives a column resize and
-                # does not read as a typo.
-                deep = particular.startswith(acc.DETAIL_INDENT)
-                name = sheet.cell(row=at + 1 + offset, column=column,
-                                  value=particular.strip())
-                if deep:
-                    name.alignment = Alignment(indent=2)
-                else:
-                    name.font = Font(bold=True) if rows and any(
-                        _cell_text(v).startswith(acc.DETAIL_INDENT)
-                        for v in section.frame.iloc[:, 0]) else Font()
-                figure = sheet.cell(row=at + 1 + offset, column=column + 1,
-                                    value=None if pd.isna(value) else float(value))
-                figure.number_format = money
-
-        total_row = at + 1 + rows
-        for column, section in ((1, left), (4, other)):
-            if section is None:
-                continue
-            label = sheet.cell(row=total_row, column=column, value="Total")
-            figure = sheet.cell(row=total_row, column=column + 1,
-                                value=report.totals.get(section.heading))
-            for cell in (label, figure):
-                cell.font = Font(bold=True)
-                cell.border = Border(top=rule, bottom=heavy)
-            figure.number_format = money
-        at = total_row + 2
+        # The side's own total, HANDED OVER rather than derived: the
+        # detailed form carries a heading and its accounts, so the column
+        # cannot simply be added up.
+        at += 1
+        label = _excel_look(sheet.cell(row=at, column=2,
+                                       value=f"Total {section.heading}"),
+                            bold=True, colour=EXCEL_INK)
+        figure = _excel_look(sheet.cell(row=at, column=3,
+                                        value=report.totals.get(
+                                            section.heading)),
+                             bold=True, colour=EXCEL_INK)
+        figure.number_format = EXCEL_MONEY
+        for cell in (label, figure):
+            cell.border = Border(top=thin, bottom=double)
+        at += 2
 
     for note in report.notes:
         if not note:
             continue
-        sheet.merge_cells(start_row=at, start_column=1,
-                          end_row=at, end_column=5)
-        cell = sheet.cell(row=at, column=1, value=note)
-        cell.font = Font(italic=True, size=9, color="FF666666")
+        cell = _excel_look(sheet.cell(row=at, column=2, value=note),
+                           italic=True, size=9, colour=EXCEL_GREY)
         cell.alignment = Alignment(wrap_text=True, vertical="top")
         at += 1
 
-    sheet.sheet_view.showGridLines = False
+    # Below the title block, so the heading stays put while the statement
+    # scrolls - the template freezes its own header the same way.
+    sheet.freeze_panes = "A6"
+    _excel_cover(book, report, [sheet.title])
     book.save(target)
 
 
-def _csv_sides(writer, report: Report) -> None:
-    """The two-sided layout again, so both exports read as one statement."""
-    for first in range(0, len(report.sections), 2):
-        pair = report.sections[first:first + 2]
-        left = pair[0]
-        other = pair[1] if len(pair) > 1 else None
-        writer.writerow([left.heading or "Particulars", "Amount", "",
-                         (other.heading if other else ""),
-                         ("Amount" if other else "")])
-        rows = max(len(left.frame), 0 if other is None else len(other.frame))
-        for offset in range(rows):
-            row = []
-            for section in (left, other):
-                if section is None or offset >= len(section.frame):
-                    row += ["", ""]
-                else:
-                    value = section.frame.iloc[offset, 1]
-                    row += [_cell_text(section.frame.iloc[offset, 0]),
-                            "" if pd.isna(value) else value]
-                if section is left:
-                    row.append("")
-            writer.writerow(row)
-        writer.writerow(["Total", report.totals.get(left.heading), "",
-                         "Total" if other else "",
-                         report.totals.get(other.heading) if other else ""])
+def _csv_statement(writer, report: Report) -> None:
+    """The statement in the same stacked shape, so both exports read alike.
+
+    Indented with spaces because a CSV has no other way to carry depth, and
+    the figures stay bare numbers so the file can still be summed.
+    """
+    for section in _statement_order(report):
+        writer.writerow([section.heading or "Particulars", "Amount"])
+        for depth, label, value in _statement_rows(section):
+            name = (f"Total {label}" if depth == _TOTAL
+                    else "  " * int(depth) + label)
+            writer.writerow([name, "" if value is None or pd.isna(value)
+                             else value])
+        writer.writerow([f"Total {section.heading}",
+                         report.totals.get(section.heading)])
         writer.writerow([])
     for note in report.notes:
         if note:
@@ -916,38 +1117,77 @@ def _csv_sides(writer, report: Report) -> None:
 def _export_excel(report: Report, target: Path) -> None:
     """A sheet per section, each headed with who, what and when.
 
+    Dressed like the two-sided statement - same face, same title block, same
+    gutter, gridlines off - because the user asked for the balance sheet in
+    the template's format "and similarly other reports with similar header",
+    and a workbook whose sheets disagree about their own look reads as two
+    documents stapled together.
+
     Sheet names are trimmed to Excel's 31 characters and stripped of the
     characters it refuses, because a long section heading would otherwise make
     the whole write fail at the last step.
     """
-    if report.side_by_side:
-        _export_excel_sides(report, target)
+    from openpyxl.styles import Alignment, Border, Side
+
+    if report.two_sided:
+        _export_excel_statement(report, target)
         return
+    rule = Side(style="thin", color=EXCEL_INK)
     with pd.ExcelWriter(target, engine="openpyxl") as writer:
         for index, section in enumerate(report.sections):
             name = re.sub(r"[\[\]:*?/\\]", " ",
                           section.heading or report.title)[:31].strip()
             name = name or f"Sheet{index + 1}"
             frame = section.frame
-            frame.to_excel(writer, sheet_name=name, index=False, startrow=4)
+            # Written from column B, leaving column A as the template's
+            # narrow gutter. `startrow=4` puts the column headers on row 5,
+            # so the figures begin on row 6 and the title block sits above.
+            frame.to_excel(writer, sheet_name=name, index=False, startrow=4,
+                           startcol=1)
             sheet = writer.sheets[name]
-            sheet["A1"] = db.company_display_name()
-            sheet["A2"] = report.title
-            sheet["A3"] = report.period
-            if section.heading:
-                sheet["A4"] = section.heading
+            sheet.sheet_view.showGridLines = False
+            sheet.column_dimensions["A"].width = 3.0
+            # A section's own name joins the title rather than taking a row
+            # of its own, so the header block is the same three lines on
+            # every sheet of every report.
+            _excel_title_block(
+                sheet, report,
+                title=(f"{report.title} - {section.heading}"
+                       if section.heading else report.title))
+            first = 6
+            money_columns = {c for c in section.numeric if c in frame.columns}
             # Enough width to read a ledger name or a formatted figure.
-            for column, header in enumerate(frame.columns, start=1):
-                width = max(len(str(header)) + 2,
-                            *(len(str(v)) + 2 for v in frame[header])) \
-                    if len(frame) else len(str(header)) + 2
+            for column, header in enumerate(frame.columns, start=2):
+                is_money = header in money_columns
+                width = max([len(str(header))]
+                            + [_excel_width(v, is_money)
+                               for v in frame[header]]) + 2
                 sheet.column_dimensions[
                     sheet.cell(row=5, column=column).column_letter].width = \
                     min(40, max(10, width))
+                label = _excel_look(sheet.cell(row=5, column=column),
+                                    bold=True, colour=EXCEL_BLUE)
+                label.border = Border(bottom=rule)
+                if is_money:
+                    label.alignment = Alignment(horizontal="right")
+                for offset in range(len(frame)):
+                    cell = _excel_look(sheet.cell(row=first + offset,
+                                                  column=column))
+                    if not is_money:
+                        continue
+                    # The format goes on the CELLS rather than the column,
+                    # which openpyxl does not style as a unit; a money column
+                    # holding text on some rows (the ledger's "88,000.00 Dr")
+                    # is unharmed - Excel ignores a number format on text.
+                    cell.number_format = EXCEL_MONEY
             if report.notes:
-                start = 6 + len(frame)
+                start = first + len(frame) + 1
                 for offset, note in enumerate(report.notes):
-                    sheet.cell(row=start + offset, column=1, value=note)
+                    cell = _excel_look(
+                        sheet.cell(row=start + offset, column=2, value=note),
+                        italic=True, size=9, colour=EXCEL_GREY)
+                    cell.alignment = Alignment(wrap_text=True, vertical="top")
+            sheet.freeze_panes = "A6"
 
 
 class ReportActions(QtWidgets.QWidget):
@@ -1996,35 +2236,48 @@ class VoucherScreen(QtWidgets.QWidget):
             cell.setText(acc.fmt_side(running[name]))
 
     def _tidy_amount(self, item) -> None:
-        """Take the padding off an amount that was pasted rather than typed.
+        """Put an amount into the ordinary form once it has been entered.
 
-        `parse_amount` already ignores the whitespace, so the voucher adds up
-        either way; this is about the cell you read back afterwards, which
-        should hold the figure and not the spacing it came with.
+        **Every amount, typed as well as pasted** - two decimals and a
+        thousands separator (user asked 2026-10-21: "while entering the
+        numbers manually in voucher entry it should be also in 1000 separator
+        automatically"). It had been pasted amounts only, on the reasoning
+        that a cell reformatting itself under the person entering it is its
+        own annoyance; the user asked for it anyway, and a column of figures
+        where some carry separators and some do not is the worse of the two.
 
-        Rewritten ONLY when whitespace was actually there. An amount being
-        typed by hand ("500") has to be left exactly as it stands - a cell
-        that reformats itself under the person entering it is worse than one
-        that shows "500" where the line above shows "1,000.00".
+        It is safe BECAUSE IT RUNS ON COMMIT, not on each keystroke: the
+        delegate writes the editor's text into the item when editing ends, so
+        this cannot move the caret or fight a half-typed number.
+
+        Three cases that must not be reformatted:
+        * an EMPTY cell, which would otherwise become 0.00 and read as a
+          figure that was entered - every blank line in the grid has two of
+          these;
+        * anything unreadable, which keeps its text so it can be seen and
+          corrected rather than being quietly turned into 0.00;
+        * a cell already in the ordinary form, so that the common case writes
+          nothing at all.
         """
         if self._loading or item is None or item.column() not in (1, 2):
             return
-        squeezed = squeeze(item.text())
-        if squeezed == item.text():
+        text = item.text()
+        if not text.strip():
             return
-        amount = parse_amount(squeezed)
+        amount = read_amount(text)
+        wanted = squeeze(text) if amount is None else f"{amount:,.2f}"
+        if wanted == text:
+            return
         # Signals blocked: this is a correction to what was just entered, not
         # a fresh entry, and the suggestion handler must not be told twice
         # about one change. The slots still to run in THIS emission read the
         # cell afresh, so they see the tidied figure.
         self.grid.blockSignals(True)
         try:
-            # Reformatted when it reads as money; otherwise only de-spaced, so
-            # that something unreadable stays visible to be corrected rather
-            # than being quietly turned into 0.00.
-            item.setText(f"{amount:,.2f}" if amount else squeezed)
+            item.setText(wanted)
         finally:
             self.grid.blockSignals(False)
+
 
     def _amount_typed(self, item) -> None:
         """Offer the balancing amount on the next line.
@@ -3512,9 +3765,9 @@ class BalanceSheetScreen(QtWidgets.QWidget):
                 ReportSection("Assets", self._sides.get("assets", blank),
                               ("Amount",))],
             notes=self._lines + [self._note],
-            # Read left and right on one sheet, and told its own totals -
+            # One document rather than two tables, and told its own totals -
             # the detailed form's Amount column cannot be summed.
-            side_by_side=True,
+            two_sided=True,
             totals={"Liabilities": self._totals.get("liabilities", 0.0),
                     "Assets": self._totals.get("assets", 0.0)})
 

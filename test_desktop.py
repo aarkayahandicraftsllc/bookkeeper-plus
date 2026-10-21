@@ -174,12 +174,35 @@ check("the day book names both sides in their own columns",
 stretched = [labels[i] for i in range(len(labels))
              if daybook_header.sectionResizeMode(i)
              == QtWidgets.QHeaderView.Stretch]
-# WHICH of the two it is depends on the ledger names in the book, so only
-# that it is one of them is asserted - the defect was that it was neither.
-check("and the slack goes to a ledger column, not to Date",
+check("and the slack goes to the ledger columns, not to Date",
       [c for c in stretched if c not in ("Debit account", "Credit account")],
       [])
-check("exactly one column takes it", len(stretched), 1)
+# BOTH of them, as of 2026-10-21 ("adjust the column width of Dedit account
+# and credit account so that all columns are visible without scolling").
+# Stretching only the wider left the other at its full content width - 907px
+# against the stretched one's 19px - and the table scrolled sideways anyway.
+check("BOTH account columns share it", sorted(stretched),
+      ["Credit account", "Debit account"])
+# The full text has to stay reachable, since a stretched column elides.
+accounts = window.daybook.table.item(0, 1)
+check("an account cell carries its full text as a tooltip",
+      accounts.toolTip(), accounts.text())
+
+# A report with ONE long column is unchanged: nothing else comes within half
+# of it, so it alone stretches, exactly as before.
+ledger_header = window.ledger.table.horizontalHeader()
+ledger_labels = [window.ledger.table.horizontalHeaderItem(i).text()
+                 for i in range(window.ledger.table.columnCount())]
+ledger_stretched = [ledger_labels[i] for i in range(len(ledger_labels))
+                    if ledger_header.sectionResizeMode(i)
+                    == QtWidgets.QHeaderView.Stretch]
+check("the ledger still stretches its Particulars alone",
+      ledger_stretched, ["Particulars"])
+# The rule is about SHAPE, not width: every column of known shape is sized to
+# its contents however narrow the book's names happen to be.
+check("no column of known shape takes the slack",
+      [c for c in stretched + ledger_stretched
+       if c in desktop.NARROW_COLUMNS], [])
 check("trial balance has rows", window.trial.table.rowCount() > 0, True)
 check("trial balance reports agreement",
       "equal credits" in window.trial.status.text(), True)
@@ -1114,48 +1137,118 @@ for index, title in REPORTS.items():
     # else keeps a sheet per table.
     check(f"{title}: the workbook is laid out as the report asks",
           len(book.sheetnames),
-          1 if report.side_by_side else len(report.sections))
+          # A two-sided statement is one sheet, plus the cover page the
+          # supplied template opens with.
+          2 if report.two_sided else len(report.sections))
     check(f"{title}: each sheet is headed with the company",
-          book[book.sheetnames[0]]["A1"].value, db.company_display_name())
+          book[book.sheetnames[-1]]["B2"].value, db.company_display_name())
     book.close()
 
-# The balance sheet exports as ONE sheet, read left and right (user asked
-# 2026-10-20: "not in 2 seperate sheets, it should be in one sheet and looks
-# more professional"). Two sheets meant holding one side in your head while
-# looking at the other.
+# The balance sheet exports in the shape of the template the user supplied
+# 2026-10-21 ("i want balance sheet output in this format"): a cover page,
+# then ONE stacked statement - Assets, then Liabilities - with the groups
+# indented under each side and the accounts indented again. This replaced the
+# side-by-side layout asked for on 2026-10-20; the user was shown both and
+# chose the template's shape.
 window.show_screen([n for n, _ in window.screens].index("Balance Sheet"))
+window.sheet.detailed.setChecked(True)
+window.sheet.refresh()
 settle()
-sides_path = db.DATA_DIR / "sides.xlsx"
-desktop.export_report(window.sheet.report(), path=str(sides_path))
+statement_report = window.sheet.report()
+sides_path = db.DATA_DIR / "statement.xlsx"
+desktop.export_report(statement_report, path=str(sides_path))
 book = openpyxl.load_workbook(sides_path)
-sides = book[book.sheetnames[0]]
-check("one sheet, not one per side", len(book.sheetnames), 1)
-check("headed with the company", sides["A1"].value, db.company_display_name())
-check("then what the report is", sides["A2"].value, "Balance Sheet")
-check("then when it is drawn at", "as at" in str(sides["A3"].value), True)
-check("the two sides sit beside each other",
-      [sides["A5"].value, sides["D5"].value], ["Liabilities", "Assets"])
-check("with a figures column each",
-      [sides["B5"].value, sides["E5"].value], ["Amount", "Amount"])
-totals_at = [r for r in range(1, sides.max_row + 1)
-             if sides.cell(row=r, column=1).value == "Total"]
-check("each side is ruled off and totalled", len(totals_at), 1)
-check("and the totals agree with the statement",
-      [sides.cell(row=totals_at[0], column=c).value for c in (2, 5)],
-      [window.sheet.report().totals["Liabilities"],
-       window.sheet.report().totals["Assets"]])
-check("the total is emphasised",
-      sides.cell(row=totals_at[0], column=1).font.bold, True)
-# Still numbers with a format, never formatted text - the layout got smarter,
-# the principle did not change.
-# int, not float, when the figure is whole - openpyxl narrows it on the way
-# back in. What matters is that it is a NUMBER and not text.
+check("a cover page, then the statement", book.sheetnames,
+      ["Cover Page", "Balance Sheet"])
+
+cover = book["Cover Page"]
+check("the cover names the report", cover["C11"].value, "Balance Sheet")
+check("and whose books it is", cover["C12"].value, db.company_display_name())
+check("its contents are clickable, not decoration",
+      cover["C17"].value == "Balance Sheet"
+      and cover["C17"].hyperlink is not None, True)
+
+sides = book["Balance Sheet"]
+check("the statement is headed with the company",
+      sides["B2"].value, db.company_display_name())
+check("then what the report is", sides["B3"].value, "Balance Sheet")
+check("then when it is drawn at", "as at" in str(sides["B4"].value), True)
+# The column header carries the DATE only - the period also mentions that the
+# accounts are shown, which belongs in the title block and would run three
+# columns wide here.
+check("the figures column is headed with the date alone",
+      sides["C5"].value, "As at " + db.show_date(window.sheet.period.range()[1]))
+
+# Read the statement back as (indent, label, figure).
+lines = []
+for r in range(6, sides.max_row + 1):
+    label = sides.cell(row=r, column=2).value
+    if label is None:
+        continue
+    lines.append((int(sides.cell(row=r, column=2).alignment.indent or 0),
+                  str(label), sides.cell(row=r, column=3).value, r))
+labels = [label for _, label, _, _ in lines]
+check("ASSETS leads, the way the template lays it out",
+      labels.index("Assets") < labels.index("Liabilities"), True)
+check("a side header carries no indent",
+      [i for i, label, _, _ in lines if label in ("Assets", "Liabilities")],
+      [0, 0])
+check("groups are indented under it, accounts indented again",
+      sorted({i for i, _, _, _ in lines}), [0, 1, 2])
+
+# Each side's total is handed over, emphasised, and ruled the way a
+# statement's total is.
+for side in ("Assets", "Liabilities"):
+    row = next(r for _, label, _, r in lines if label == f"Total {side}")
+    cell = sides.cell(row=row, column=3)
+    check(f"Total {side} agrees with the statement",
+          cell.value, statement_report.totals[side])
+    check(f"Total {side} is emphasised and ruled",
+          (cell.font.bold, cell.border.top.style, cell.border.bottom.style),
+          (True, "thin", "double"))
+
+# THE ARITHMETIC: a group's own total is the sum of the accounts above it.
+# This is what the layout buys - the heading no longer carries a figure, so
+# the column adds up instead of double-counting.
+running, checked = [], 0
+for indent, label, value, _ in lines:
+    if indent == 2:
+        running.append(float(value or 0))
+    elif label.startswith("Total ") and running:
+        if label not in ("Total Assets", "Total Liabilities"):
+            check(f"{label} is the sum of its accounts",
+                  round(float(value or 0), 2), round(sum(running), 2))
+            checked += 1
+        running = []
+check("and there were groups to check", checked > 0, True)
+
+# Still numbers with a format, never formatted text.
+figures = [v for i, _, v, _ in lines if i == 2 and v is not None]
 check("amounts are numbers",
-      isinstance(sides["B6"].value, (int, float))
-      and not isinstance(sides["B6"].value, bool), True)
-check("carrying a money format", sides["B6"].number_format, "#,##0.00")
+      all(isinstance(v, (int, float)) and not isinstance(v, bool)
+          for v in figures), True)
+check("carrying a money format",
+      {sides.cell(row=r, column=3).number_format
+       for i, _, v, r in lines if i == 2 and v is not None},
+      {desktop.EXCEL_MONEY})
 check("and the gridlines are off", sides.sheet_view.showGridLines, False)
+check("with the heading frozen above the statement", sides.freeze_panes, "A6")
 book.close()
+
+# The CSV describes the same statement, so the two do not disagree.
+csv_path = db.DATA_DIR / "statement.csv"
+desktop.export_report(statement_report, path=str(csv_path))
+csv_lines = csv_path.read_text(encoding="utf-8-sig").splitlines()
+check("the CSV is stacked too, Assets first",
+      [n for n, line in enumerate(csv_lines) if line.startswith("Assets")][0]
+      < [n for n, line in enumerate(csv_lines)
+         if line.startswith("Liabilities")][0], True)
+check("and carries both side totals",
+      all(any(line.startswith(f"Total {side}") for line in csv_lines)
+          for side in ("Assets", "Liabilities")), True)
+window.sheet.detailed.setChecked(False)
+window.sheet.refresh()
+settle()
 
 # Figures stay NUMBERS in a spreadsheet so they can be summed on arrival; a
 # column of "1,234.00" strings is a file you have to repair before using.
@@ -1170,7 +1263,47 @@ amounts = [sheet.cell(row=r, column=columns.index("Debit") + 1).value
            for r in range(6, 6 + len(trial.sections[0].frame))]
 check("exported amounts are numbers, not formatted text",
       all(v is None or isinstance(v, (int, float)) for v in amounts), True)
+# ...and asked 2026-10-21 to SHOW as money: "the numbers in all the excel
+# outputs should have 2 decimal places and 1000 seperater". Only the
+# side-by-side balance sheet carried a format before this; every other
+# report wrote its figures in General, so 1234.5 arrived as "1234.5".
+# A FORMAT keeps them summable, which is why both rules can hold at once.
+money_cells = [sheet.cell(row=r, column=columns.index("Debit") + 1)
+               for r in range(6, 6 + len(trial.sections[0].frame))]
+check("and every one of them shows as money",
+      {c.number_format for c in money_cells}, {desktop.EXCEL_MONEY})
+check("the text columns are left alone",
+      sheet.cell(row=6, column=columns.index("Particulars") + 1).number_format,
+      "General")
+# A column sized for the raw float shows ##### once it is formatted.
+check("the money column is wide enough for the formatted figure",
+      sheet.column_dimensions[
+          sheet.cell(row=5, column=columns.index("Debit") + 1).column_letter
+      ].width >= len(f"{max(v or 0 for v in amounts):,.2f}"), True)
 book.close()
+
+# Every report, not just the one: each section declares which columns hold
+# money, and all of them are now formatted.
+for index, where in ((1, "Day Book"), (2, "Ledger"), (4, "Profit & Loss")):
+    window.show_screen(index)
+    settle()
+    report = window.current_report()
+    path = db.DATA_DIR / f"money-{index}.xlsx"
+    desktop.export_report(report, path=str(path))
+    opened = openpyxl.load_workbook(path)
+    formats = set()
+    for position, section in enumerate(report.sections):
+        page = opened[opened.sheetnames[position]]
+        header = [c.value for c in page[5]]
+        for column in section.numeric:
+            if column not in header:
+                continue
+            at = header.index(column) + 1
+            formats |= {page.cell(row=r, column=at).number_format
+                        for r in range(6, 6 + len(section.frame))}
+    check(f"{where}: money columns carry the format",
+          formats <= {desktop.EXCEL_MONEY}, True)
+    opened.close()
 # ...while the printed page IS formatted, being the copy somebody reads.
 check("the printed page groups the thousands",
       "," in desktop.report_html(trial), True)
@@ -1685,7 +1818,9 @@ v.grid.item(0, 1).setText("1,000.00")        # retype the same figure
 settle()
 check("re-entering the same amount disturbs nothing typed",
       [v.grid.item(1, 2).text(), v.grid.item(2, 2).text()],
-      ["400", "600"])
+      # Tidied to the ordinary form as of 2026-10-21 - the FIGURES are what
+      # must be undisturbed, and 400 and 600 are still exactly what stands.
+      ["400.00", "600.00"])
 
 # A suggestion that is no longer needed is withdrawn, not left to be read as
 # a figure.
@@ -2033,14 +2168,37 @@ check("and the voucher counts it", v.dr_label.text(), "Dr 1,000.00")
 check("the balancing amount is still offered from it",
       v.grid.item(1, 2).text(), "1,000.00")
 
-# Typed amounts must be left ALONE - a cell that reformats itself under the
-# person entering it is its own annoyance.
+# TYPED amounts are tidied as well, as asked later the same day: "while
+# entering the numbers manually in voucher entry it should be also in 1000
+# separator automatically". This reverses the original choice to leave typed
+# figures exactly as typed. Safe because it runs on COMMIT, not per
+# keystroke, so it cannot fight a half-typed number.
 v.reset()
 settle()
 set_row(v, 0, "Bank")
 v.grid.item(0, 1).setText("500")
 settle()
-check("a typed amount is not reformatted", v.grid.item(0, 1).text(), "500")
+check("a typed amount gains its decimals", v.grid.item(0, 1).text(), "500.00")
+v.grid.item(0, 1).setText("1234567.5")
+settle()
+check("and its thousands separators",
+      v.grid.item(0, 1).text(), "1,234,567.50")
+v.grid.item(0, 1).setText("0")
+settle()
+check("zero is a figure, so it is tidied too",
+      v.grid.item(0, 1).text(), "0.00")
+
+# An EMPTY cell must stay empty: every blank line in the grid holds two of
+# them, and 0.00 would read as a figure somebody entered.
+v.grid.item(0, 1).setText("")
+settle()
+check("an empty cell stays empty", v.grid.item(0, 1).text(), "")
+v.reset()
+settle()
+check("and a fresh form holds no figures at all",
+      [v.grid.item(r, c).text()
+       for r in range(v.grid.rowCount()) for c in (1, 2)],
+      [""] * (v.grid.rowCount() * 2))
 
 # Something unreadable keeps its text, so it can be seen and corrected,
 # rather than being turned into a confident 0.00.

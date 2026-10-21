@@ -545,6 +545,39 @@ printer list, so there is no separate PDF command to keep working.
 
 **Export** writes an **Excel workbook** (a sheet per table, each headed with the
 company, the report and the period) or a **CSV** if you name the file `.csv`.
+
+### The shape of an exported workbook
+
+Taken from a template supplied 2026-10-21: a narrow gutter in column A, one
+wide column of labels indented by depth, figures to the right, **gridlines
+off**, blue headings in Open Sans, and the same three-line header — company,
+report, period — at the top of every sheet of every report.
+
+The **balance sheet** gets the template's full treatment: a **Cover Page**
+with the title and a clickable table of contents, then the statement
+**stacked** — `Assets`, its groups indented under it, their accounts indented
+again, each group totalled beneath its accounts, and the side totalled under a
+thin rule with a double rule below; then `Liabilities` the same way.
+
+> **This replaced the side-by-side layout** (liabilities left, assets right)
+> asked for on 2026-10-20. Both were put side by side as mock-ups and the
+> template's shape was chosen. Assets leads, as the template has it — the
+> *screen* and the *printed page* keep the left/right arrangement, so only the
+> exports changed.
+
+Two things that layout buys, beyond looking like the template:
+
+* **The figure column adds up.** A group's heading no longer carries a figure;
+  it is moved to a `Total …` line *below* its accounts. That is both how a
+  statement is read and the end of the double-counting the detailed form
+  otherwise warns about.
+* **The CSV is stacked the same way**, from the same `_statement_order`, so the
+  two exports cannot end up describing the statement differently.
+
+Totals are written as **values, not `SUM()` formulas**. A formula written by
+openpyxl carries no cached result, so anything that reads the file without
+recalculating — pandas, a preview pane, an import into Sheets — would find a
+blank where the total belongs.
 Both are offered in the save dialog, which **opens on your Downloads folder**
 with a name already filled in — and the file is **opened** once it is written.
 Opening it is most of the point: an export you then have to go and find is a
@@ -563,7 +596,11 @@ Two deliberate differences between the two outputs:
   print as `1,234.00`, grouped and right-aligned, because that copy is read by
   a person. The spreadsheet gets the raw number, because that copy is summed
   and pivoted — a column of `"1,234.00"` *strings* is a file you have to repair
-  before you can use it.
+  before you can use it. It still **shows** as `1,234.00`: every money column
+  carries a **number format** (`EXCEL_MONEY`), which is a display rule, not
+  text, so both things are true at once. Column widths are measured on the
+  *formatted* text — a column sized for `1234.5` answers `#####` once it is
+  formatted.
 * **A CSV holds one table, so a report with four of them is laid out, not
   dumped.** Blank lines and headings are what let a reader tell where the
   trading account ends and the indirect one begins. The Streamlit download
@@ -768,6 +805,30 @@ taking a screenshot cannot write to `data/`, and it never shows the window. It
 runs on the *native* platform rather than offscreen on purpose: Light keeps the
 native widget style, and offscreen would render it as Fusion — that is, not the
 thing being judged.
+
+## Column widths
+
+A report table sizes each column to its contents, except the ones holding
+**names**, which share whatever width is left over. That is what keeps a
+report inside the window instead of scrolling sideways.
+
+Which columns flex is decided by their **shape**, listed in
+`desktop.NARROW_COLUMNS` — a date, a voucher type, a voucher number, a status
+word and a `Balance` all have a known width. Everything else holds a name, or
+a list of names, of no fixed length.
+
+> **Width cannot make that decision**, which is the trap here. In a book of
+> short ledger names `Date` needs ten characters and `Particulars` eleven, so
+> any "stretch the widest" rule eventually hands a ten-character date the
+> slack. An earlier version did exactly that, and the version after it
+> stretched only the *single* widest column — which on the Day Book meant
+> `Credit account` was crushed to **19px** while `Debit account` took its full
+> **907px** and the table scrolled anyway.
+
+Because a shared column can be narrower than its contents, Qt elides what does
+not fit — so every text cell carries its **full text as a tooltip**. A side
+touching several ledgers reads `Cash / Deepa Gupta / …` and must not become
+unrecoverable because the window is narrow.
 
 ## Sorting a report
 
