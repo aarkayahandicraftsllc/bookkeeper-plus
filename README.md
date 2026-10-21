@@ -52,6 +52,7 @@ entry; use either for reports.
 | `Alt+L` | Create a ledger from the line you are on |
 | `F2` | Set the voucher date |
 | `F11` | Refresh every report |
+| `Alt+Left` | Back to where you came from |
 | `Esc` | Back to voucher entry |
 | `Ctrl+Shift+1` … `Ctrl+Shift+5` | Colour scheme |
 | `Ctrl+P` | Print the report on screen |
@@ -444,6 +445,31 @@ Balances are held **debit-positive** internally: `+500` is 500 Dr, `-500` is
 | **Balance Sheet** | Liabilities and assets side by side, with net profit carried to Profit & Loss A/c. Summary, or **the accounts under each heading**. |
 | **Masters** | Create and alter ledgers and sub-groups. |
 | **Company** | Who the books belong to: name, address, PAN, GSTIN, TAN, CIN, financial year, currency. |
+
+### Coming back out
+
+Every report screen carries a **← Back** button, at the left of the row that
+already holds Print and Export — so it costs no height, which matters on a
+760px window where the Company form already scrolls. **`Alt+Left`** does the
+same thing from anywhere, including the screens with no button, and both are
+greyed out when there is nowhere to go.
+
+It is a **stack of places, not a single "previous screen"**, so
+Trial Balance → the account's months → one month comes back out the way it
+went in, a step at a time. A place remembers the **Ledger's own state** —
+account, period and the monthly tick — because that is the one screen a
+drill-down rearranges; going back to it has to mean going back to *how it
+was*, not merely to the screen.
+
+Two things deliberately leave no trace:
+
+* **Altering a voucher.** It already returns to the report it was opened from,
+  so the round trip is rubbed out — Back should not offer you the emptied
+  voucher form.
+* **Going back itself**, or Back would bounce between two screens forever.
+
+`Esc` is unchanged and is *not* this: it jumps to voucher entry, wherever you
+are.
 
 ### An account month by month
 

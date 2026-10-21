@@ -1283,11 +1283,27 @@ class ReportActions(QtWidgets.QWidget):
     export the empty one the screen started with.
     """
 
+    # Marks the Back buttons so the window can enable them together: there is
+    # one per report screen, and whether going back is possible is the
+    # window's business, not any screen's.
+    BACK = "report-back"
+
     def __init__(self, source, parent=None):
         super().__init__(parent)
         self.source = source
         row = QtWidgets.QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
+        # Back sits at the LEFT, where it does in everything else, and in a
+        # row of buttons this screen already has - so it costs no height. The
+        # window is short enough that a toolbar for one button would be felt
+        # (the Company form already scrolls at the default size).
+        self.back_button = QtWidgets.QPushButton("←  Back")
+        self.back_button.setObjectName(self.BACK)
+        self.back_button.setToolTip(
+            "Back to where you came from  (Alt+Left)")
+        self.back_button.clicked.connect(self._go_back)
+        self.back_button.setEnabled(False)
+        row.addWidget(self.back_button)
         row.addStretch(1)
         self.print_button = QtWidgets.QPushButton("Print…  (Ctrl+P)")
         self.print_button.setToolTip("Preview and print, or save as PDF from "
@@ -1300,8 +1316,17 @@ class ReportActions(QtWidgets.QWidget):
         row.addWidget(self.print_button)
         row.addWidget(self.export_button)
 
+    def _go_back(self) -> None:
+        # Resolved on the CLICK, not at build time: these screens are built
+        # inside MainWindow.__init__, so `window()` is still None then.
+        window = self.window()
+        if isinstance(window, QtWidgets.QMainWindow):
+            window.go_back()
+
     def print_report(self) -> None:
         preview_report(self.source(), self)
+
+
 
     def export(self) -> None:
         export_and_open(self.source(), self)
@@ -3524,6 +3549,28 @@ class LedgerScreen(QtWidgets.QWidget):
         self._shown = pd.DataFrame()
         self._summary = ""
 
+    def state(self) -> dict:
+        """Everything about this screen worth coming back to.
+
+        The Ledger is the one screen a drill-down REARRANGES - it is given an
+        account, a period and sometimes the monthly view - so going back to
+        it means going back to how it was, not merely to the screen. The
+        report screens are left as they were when you drilled out of them,
+        so their index alone is enough.
+        """
+        start, end = self.period.range()
+        return {"account": self.ledger_box.currentText(),
+                "monthly": self.monthly.isChecked(),
+                "from": start, "to": end}
+
+    def restore(self, state: dict) -> None:
+        if not state:
+            return
+        self.ledger_box.setCurrentText(state["account"])
+        self.monthly.setChecked(state["monthly"])
+        self.period.show_period(state["from"], state["to"])
+        self.refresh()
+
     def reload_ledgers(self) -> None:
         current = self.ledger_box.currentText()
         names = list(db.get_ledgers(include_inactive=True)["name"])
@@ -3622,6 +3669,12 @@ class LedgerScreen(QtWidgets.QWidget):
             # refresh `show_period` sets off already draws the entries,
             # rather than drawing months and being asked again.
             start, end = key
+            # Recorded by hand because this drill-down does not change
+            # SCREEN - it rearranges this one - so `show_screen` never sees
+            # it and Back would otherwise skip straight past the months.
+            window = self.window()
+            if isinstance(window, QtWidgets.QMainWindow):
+                window.remember_place()
             self.monthly.setChecked(False)
             self.period.show_period(start, end)
             self.refresh()
@@ -5128,6 +5181,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.stack.addWidget(widget)
 
         self._altered_from: int | None = None
+        # Places visited, for the Back button. See `remember_place`.
+        self._history: list[dict] = []
+        self._going_back = False
+        self._history_before_alter = 0
         self.voucher.posted.connect(self.refresh_all)
         self.voucher.altered.connect(self._back_from_alter)
         self.voucher.masters_changed.connect(self._masters_changed)
@@ -5159,6 +5216,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_menu(self) -> None:
         bar = self.menuBar()
         go = bar.addMenu("&Go")
+        # Alt+Left is the back key everywhere else on this platform, and it
+        # is not a letter - so it cannot collide with a menu mnemonic the
+        # way Alt+C once did.
+        self.back_action = QtGui.QAction("Back", self)
+        self.back_action.setShortcut(QtGui.QKeySequence("Alt+Left"))
+        self.back_action.setEnabled(False)
+        self.back_action.triggered.connect(self.go_back)
+        go.addAction(self.back_action)
+        go.addSeparator()
         for index, (label, _) in enumerate(self.screens):
             action = QtGui.QAction(label.replace("&&", "&"), self)
             action.setShortcut(QtGui.QKeySequence(f"Ctrl+{index + 1}"))
@@ -5691,6 +5757,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # was opened from (user asked 2026-10-20): you were reading the Day
         # Book and went to fix one line, not starting a new voucher.
         self._altered_from = self.stack.currentIndex()
+        # How deep the history was on the way in, so the whole round trip
+        # can be rubbed out again on the way back. Altering a voucher and
+        # saving it leaves you where you started, so it should leave nothing
+        # for Back to find - least of all the emptied voucher form.
+        self._history_before_alter = len(self._history)
         self.voucher.load_voucher(int(voucher_id))
         self.show_screen(0)
 
@@ -5704,7 +5775,15 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         index, self._altered_from = self._altered_from, None
         if index is not None and index != 0:
-            self.show_screen(index)
+            # Not recorded as a place of its own: this IS the way back, and
+            # the trip out is dropped with it.
+            self._going_back = True
+            try:
+                self.show_screen(index)
+            finally:
+                self._going_back = False
+            del self._history[self._history_before_alter:]
+            self._sync_back()
 
     def _show_ledger(self, name: str, start, end,
                      monthly: bool = False) -> None:
@@ -5741,7 +5820,51 @@ class MainWindow(QtWidgets.QMainWindow):
                               if widget is self.ledger))
         self.statusBar().showMessage(f"Ledger: {name}", 4000)
 
+    # --- where you have been ---------------------------------------------- #
+    # A back button, because drilling down used to be one-way: the only way
+    # out of a ledger you had reached from the trial balance was the Go menu
+    # (user asked 2026-10-21). Kept as a stack of places rather than a single
+    # "previous screen", so Trial Balance -> months -> one month comes back
+    # out the way it went in, a step at a time.
+    HISTORY_DEPTH = 40
+
+    def remember_place(self) -> None:
+        """Record where we are, so Back can return to it."""
+        self._history.append({
+            "index": self.stack.currentIndex(),
+            # The Ledger is the one screen a drill-down rearranges, so its
+            # account, period and monthly tick travel with the place.
+            "ledger": self.ledger.state(),
+        })
+        del self._history[:-self.HISTORY_DEPTH]
+        self._sync_back()
+
+    def go_back(self) -> None:
+        """Return to the last place recorded, and forget it."""
+        if not self._history:
+            return
+        place = self._history.pop()
+        # Set while restoring, so that the `show_screen` below does not
+        # record the place we are leaving and make Back bounce between two.
+        self._going_back = True
+        try:
+            self.ledger.restore(place["ledger"])
+            self.show_screen(place["index"])
+        finally:
+            self._going_back = False
+        self._sync_back()
+
+    def _sync_back(self) -> None:
+        """Enable every screen's Back button together, or none of them."""
+        can = bool(self._history)
+        self.back_action.setEnabled(can)
+        for button in self.findChildren(QtWidgets.QPushButton,
+                                        ReportActions.BACK):
+            button.setEnabled(can)
+
     def show_screen(self, index: int) -> None:
+        if not self._going_back and index != self.stack.currentIndex():
+            self.remember_place()
         self.stack.setCurrentIndex(index)
         widget = self.screens[index][1]
         if hasattr(widget, "reload_ledgers"):

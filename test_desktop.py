@@ -2517,6 +2517,91 @@ check("the trial balance prints plain",
       "&nbsp;" in desktop.report_html(window.trial.report(), company="Probe"),
       False)
 
+print("\n23p) Back, out of a drill-down the way you came in")
+# Asked 2026-10-21: "need a back button as in most of the screens once i
+# drill down i need to comeback from main menu". Drilling down was one-way -
+# the only way out of a ledger reached from the trial balance was the Go
+# menu.
+db.use_company(TMP)
+window._history.clear()
+window._sync_back()
+back_buttons = window.findChildren(QtWidgets.QPushButton,
+                                   desktop.ReportActions.BACK)
+check("every report screen carries a Back button", len(back_buttons),
+      len(window.findChildren(desktop.ReportActions)))
+check("and none of them is offered with nowhere to go",
+      {b.isEnabled() for b in back_buttons}, {False})
+check("nor is the menu entry", window.back_action.isEnabled(), False)
+check("pressing Back with no history does nothing, and does not raise",
+      (window.go_back(), window.stack.currentIndex())[1],
+      window.stack.currentIndex())
+
+# Trial Balance -> the account's months -> one month -> and back out again.
+window.show_screen(3)
+window.trial.by_group.setChecked(False)
+window.trial.refresh()
+settle()
+# Cleared again here: GETTING to the trial balance is itself a place, so the
+# journey below starts from nothing and the count at the end is honest.
+window._history.clear()
+window._sync_back()
+account = str(window.trial.table.key_at(0))
+window.trial.table.doubleClicked.emit(window.trial.table.model().index(0, 0))
+settle()
+check("drilled into the months", [window.stack.currentIndex(),
+                                  window.ledger.monthly.isChecked()],
+      [2, True])
+check("Back is offered now", all(b.isEnabled() for b in back_buttons), True)
+wide = window.ledger.period.range()
+
+busy = next((row for row in range(window.ledger.table.rowCount())
+             if window.ledger.table.key_at(row) is not None), 0)
+window.ledger.table.doubleClicked.emit(
+    window.ledger.table.model().index(busy, 0))
+settle()
+narrowed = window.ledger.period.range()
+check("then into one month", window.ledger.monthly.isChecked(), False)
+check("which narrowed the period", narrowed != wide, True)
+
+window.go_back()
+settle()
+check("Back returns to the months, not past them",
+      [window.stack.currentIndex(), window.ledger.monthly.isChecked()],
+      [2, True])
+check("with the period it had", window.ledger.period.range(), wide)
+check("and the same account", window.ledger.ledger_box.currentText(), account)
+
+window.go_back()
+settle()
+check("Back again lands on the Trial Balance", window.stack.currentIndex(), 3)
+check("and there is nowhere further to go",
+      window.back_action.isEnabled(), False)
+
+# A voucher alteration already returns by itself, so it must leave NOTHING
+# for Back to find - least of all the emptied form.
+window.show_screen(1)
+window.daybook.refresh()
+settle()
+window._history.clear()
+window._sync_back()
+window._alter(int(window.daybook.table.key_at(0)))
+settle()
+window.voucher.cancel_edit()
+settle()
+check("altering and returning leaves no trace in the history",
+      [window.stack.currentIndex(), window.back_action.isEnabled()],
+      [1, False])
+
+# Plain navigation is history too - that is what "back" means everywhere.
+window.show_screen(5)
+settle()
+window.go_back()
+settle()
+check("Back after an ordinary screen change goes where you were",
+      window.stack.currentIndex(), 1)
+window._history.clear()
+window._sync_back()
+
 print("\n23n) An account month by month, then one month on its own")
 # Asked 2026-10-21: "i would like to see balance for each month and then if
 # i click on that month it should show activity for that specific month
