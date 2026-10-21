@@ -7,6 +7,7 @@ means the desktop build is covered by tests rather than only eyeballed.
 """
 
 import os
+import re
 import sys
 import shutil
 import tempfile
@@ -1600,6 +1601,69 @@ window.daybook.refresh()
 window.trial.refresh()
 settle()
 
+print("\n22d) The exported Day Book shows every line's own amount")
+# Asked 2026-10-21: "while exporting daybook not able to see individual
+# amounts for multiline entries". On screen a voucher is ONE row - the right
+# shape to read down and to double-click - but that puts a compound
+# voucher's accounts in one cell as "Rent / Electricity" against a single
+# total, with the figure belonging to each nowhere on the page.
+db.use_company(TMP)
+window.show_screen(1)
+window.daybook.type_filter.setCurrentText("All")
+window.daybook.period.year_box.setCurrentText(desktop.PeriodBar.SINCE)
+window.daybook.refresh()
+settle()
+
+compound = db.save_voucher(
+    voucher_type="Journal", voucher_date=date.today(),
+    narration="three legs, one voucher",
+    lines=[{"ledger_id": db.ledger_id("Bank"), "debit": 700, "credit": 0},
+           {"ledger_id": db.ledger_id("Sales"), "debit": 0, "credit": 300},
+           {"ledger_id": db.ledger_id("Capital"), "debit": 0, "credit": 400}])
+window.daybook.refresh()
+settle()
+
+on_screen = window.daybook._shown
+exported = window.daybook.report().sections[0].frame
+check("on screen it is still one row per voucher",
+      list(on_screen.columns)[:3], ["Date", "Debit account", "Credit account"])
+check("the exported day book is one row per LINE",
+      list(exported.columns)[:6],
+      ["Date", "Vch Type", "Vch No", "Account", "Debit", "Credit"])
+
+mine = exported[exported["Narration"] == "three legs, one voucher"]
+check("every line of the compound voucher is there", len(mine), 3)
+check("each with the amount that belongs to IT",
+      sorted(round(float(d) + float(c), 2)
+             for d, c in zip(mine["Debit"], mine["Credit"])),
+      [300.0, 400.0, 700.0])
+check("named account by account, not joined into one cell",
+      sorted(mine["Account"]), ["Bank", "Capital", "Sales"])
+check("with the voucher's type and number repeated on each line",
+      [set(mine["Vch Type"]), len(set(mine["Vch No"]))], [{"Journal"}, 1])
+check("and its narration, which the screen has no room for",
+      set(mine["Narration"]), {"three legs, one voucher"})
+
+# The column still adds up to the same total, so nothing is double-counted -
+# a voucher's total IS the sum of its lines.
+check("the lines total what the vouchers total",
+      round(float(exported["Debit"].sum()), 2),
+      round(float(on_screen["Debit"].sum()), 2))
+
+# A voided voucher's lines read nil here too, as they do on screen.
+db.void_voucher(compound)
+window.daybook.refresh()
+settle()
+voided_lines = window.daybook.report().sections[0].frame
+voided_lines = voided_lines[voided_lines["Narration"] == "three legs, one voucher"]
+check("a voided voucher's lines are shown as nil",
+      [float(v) for v in voided_lines["Debit"]], [0.0, 0.0, 0.0])
+check("and say so in a Status column",
+      set(voided_lines["Status"]), {"Voided"})
+db.delete_voucher(compound)
+window.daybook.refresh()
+settle()
+
 print("\n23) Voiding, restoring and deleting a voucher")
 db.use_company(TMP)
 voucher = window.voucher
@@ -2287,6 +2351,14 @@ settle()
 check("it moves to the Ledger", window.stack.currentIndex(), 2)
 check("on the account that was clicked",
       window.ledger.ledger_box.currentText(), first)
+# ...and MONTH BY MONTH as of 2026-10-21: "instead of going to ledger i
+# would like to see balance for each month". The other two reports still
+# land on the entries.
+check("showing the months, not the entries",
+      window.ledger.monthly.isChecked(), True)
+check("and saying what a month does when clicked",
+      "double-click a month" in window.ledger.caption.text(), True)
+
 
 # THE POINT OF THE DRILL-DOWN: the ledger has to close on the figure that was
 # clicked, which means carrying the trial balance's date across. Drawn to any
@@ -2444,6 +2516,82 @@ settle()
 check("the trial balance prints plain",
       "&nbsp;" in desktop.report_html(window.trial.report(), company="Probe"),
       False)
+
+print("\n23n) An account month by month, then one month on its own")
+# Asked 2026-10-21: "i would like to see balance for each month and then if
+# i click on that month it should show activity for that specific month
+# only". A closing balance says where an account ended up; the months are
+# how you find the one that explains it.
+db.use_company(TMP)
+window.show_screen(2)
+window.ledger.ledger_box.setCurrentText("Bank")
+window.ledger.period.year_box.setCurrentText(desktop.PeriodBar.SINCE)
+window.ledger.monthly.setChecked(True)
+window.ledger.refresh()
+settle()
+
+months = window.ledger._shown
+check("the table is months now", list(months.columns),
+      ["Month", "Debit", "Credit", "Closing"])
+check("every month in the period is listed, quiet ones included",
+      len(months) >= 1, True)
+check("a month reads as a month, not a date",
+      bool(re.match(r"^[A-Z][a-z]{2} \d{4}$", str(months["Month"].iloc[0]))),
+      True)
+
+# The months must account for the whole movement, and end where the account
+# ends - that is the only reason to read them.
+whole = acc.ledger_statement(db.ledger_id("Bank"),
+                             *window.ledger.period.range())
+check("the months add up to what moved on the account",
+      [round(float(months["Debit"].sum()), 2),
+       round(float(months["Credit"].sum()), 2)],
+      [round(whole["debit_total"], 2), round(whole["credit_total"], 2)])
+check("and the last month closes where the account closes",
+      str(months["Closing"].iloc[-1]), acc.fmt_side(whole["closing"]))
+
+# Click a month: that month alone, as entries.
+busy = next((row for row in range(len(months))
+             if float(months["Debit"].iloc[row])
+             or float(months["Credit"].iloc[row])), 0)
+picked = window.ledger.table.key_at(busy)
+window.ledger.table.doubleClicked.emit(
+    window.ledger.table.model().index(busy, 0))
+settle()
+check("clicking a month stops showing months",
+      window.ledger.monthly.isChecked(), False)
+check("and narrows the period to exactly that month",
+      window.ledger.period.range(), picked)
+entries = window.ledger._shown
+check("the entries are that month's", list(entries.columns)[:2],
+      ["Date", "Particulars"])
+check("and nothing outside it is shown",
+      all(str(picked[0]) <= str(d) <= str(picked[1])
+          for d in window.ledger._frame["Date"]), True)
+check("which is the movement that month showed",
+      [round(float(entries["Debit"].sum()), 2),
+       round(float(entries["Credit"].sum()), 2)],
+      [round(float(months["Debit"].iloc[busy]), 2),
+       round(float(months["Credit"].iloc[busy]), 2)])
+
+# The monthly view is a report in its own right, so it prints and exports.
+window.ledger.monthly.setChecked(True)
+window.ledger.period.year_box.setCurrentText(desktop.PeriodBar.SINCE)
+settle()
+monthly_report = window.ledger.report()
+check("the printed report says which shape it is",
+      "month by month" in monthly_report.title, True)
+check("and carries the months", list(monthly_report.sections[0].frame.columns),
+      ["Month", "Debit", "Credit", "Closing"])
+monthly_path = db.DATA_DIR / "monthly.xlsx"
+desktop.export_report(monthly_report, path=str(monthly_path))
+book = openpyxl.load_workbook(monthly_path)
+page = book[book.sheetnames[0]]
+check("the exported months carry the money format",
+      page.cell(row=6, column=3).number_format, desktop.EXCEL_MONEY)
+book.close()
+window.ledger.monthly.setChecked(False)
+settle()
 
 print("\n23m) Double-click an account on the Profit & Loss too")
 # Asked 2026-10-21: "diuble click functionality in profit and loss as well".

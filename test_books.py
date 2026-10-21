@@ -1483,5 +1483,50 @@ check("and carries ISO in both of them",
        and not all(_iso_or_blank(v) for v in _bills[column])], [])
 db.save_company(dict(GOOD, date_format="DD/MM/YYYY"))
 
+print("\n22) An account month by month")
+# Asked 2026-10-21. Hand-worked on its own book so the figures are checkable
+# by eye rather than against the suite's running totals.
+month_db = Path(tempfile.gettempdir()) / "bookkeeper_months.db"
+month_db.unlink(missing_ok=True)
+kept_path = db.DB_PATH
+db.use_company(month_db)
+db.init_db()
+db.add_ledger("Bank", "Bank Accounts", 10_000, "Dr")
+db.add_ledger("Rent", "Indirect Expenses")
+for month, amount in ((4, 3_000), (4, 500), (6, 2_500), (9, 1_000)):
+    db.save_voucher(
+        voucher_type="Payment", voucher_date=date(2026, month, 10),
+        narration=f"rent for month {month}",
+        lines=[{"ledger_id": db.ledger_id("Rent"), "debit": amount, "credit": 0},
+               {"ledger_id": db.ledger_id("Bank"), "debit": 0, "credit": amount}])
+
+summary = acc.monthly_summary(db.ledger_id("Bank"),
+                              date(2026, 4, 1), date(2026, 10, 31))
+months = summary["months"]
+check("one row for every month in the period", len(months), 7)
+check("the quiet months are listed too, not skipped",
+      list(months["Month"]),
+      ["Apr 2026", "May 2026", "Jun 2026", "Jul 2026", "Aug 2026",
+       "Sep 2026", "Oct 2026"])
+check("April holds both of its payments", float(months["Credit"].iloc[0]), 3_500.0)
+check("May moved nothing", float(months["Credit"].iloc[1]), 0.0)
+check("and a quiet month still carries the balance forward",
+      str(months["Closing"].iloc[1]), str(months["Closing"].iloc[0]))
+check("the opening is where the first month starts from",
+      str(months["Closing"].iloc[0]), acc.fmt_side(10_000 - 3_500))
+check("the last month closes where the account closes",
+      str(months["Closing"].iloc[-1]), acc.fmt_side(summary["closing"]))
+check("and the months account for the whole movement",
+      round(float(months["Credit"].sum()), 2),
+      round(summary["credit_total"], 2))
+# Each row carries the month's own bounds, so a click can ask for exactly it
+# - and a month is not thirty days.
+check("each row knows its own last day",
+      [months["end"].iloc[0], months["end"].iloc[1]],
+      [date(2026, 4, 30), date(2026, 5, 31)])
+check("clipped to the period, not past it",
+      months["end"].iloc[-1], date(2026, 10, 31))
+db.use_company(kept_path)
+
 print("\n" + ("ALL CHECKS PASSED" if not FAILURES else f"FAILURES: {FAILURES}"))
 raise SystemExit(1 if FAILURES else 0)

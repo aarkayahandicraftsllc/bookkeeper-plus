@@ -3414,13 +3414,39 @@ class DayBookScreen(QtWidgets.QWidget):
                         else [])
 
     def report(self) -> Report:
+        """The day book LINE BY LINE, which is not what the screen shows.
+
+        Asked for 2026-10-21: "while exporting daybook not able to see
+        individual amounts for multiline entries". On screen a voucher is one
+        row, which is the right shape to read down and to double-click - but
+        it means a compound voucher's accounts arrive as "Rent / Electricity"
+        against a single total, and the figure belonging to each is nowhere.
+        Print and export both come through here, so both now carry the lines.
+        """
         kind = self.type_filter.currentText()
+        start, end = self.period.range()
+        lines = acc.day_book_lines(start, end)
+        if kind != "All" and not lines.empty:
+            lines = lines[lines["Vch Type"] == kind].reset_index(drop=True)
+        voided = int(lines["voided"].sum()) if not lines.empty else 0
+        shown = (lines.drop(columns=["voucher_id", "voided"]) if not lines.empty
+                 else pd.DataFrame(columns=["Date", "Vch Type", "Vch No",
+                                            "Account", "Debit", "Credit",
+                                            "Narration"]))
+        # Only when there is something to say, as on screen.
+        if voided:
+            shown.insert(len(shown.columns), "Status",
+                         ["Voided" if v else "" for v in lines["voided"]])
         return Report(
             title="Day Book",
             period=period_caption(self.period)
             + ("" if kind == "All" else f"  ·  {kind} vouchers only"),
-            sections=[ReportSection("", self._shown, ("Debit", "Credit"))],
-            notes=[self.count.text()])
+            sections=[ReportSection("", shown, ("Debit", "Credit"))],
+            notes=[self.count.text(),
+                   "One row per voucher line, so a compound voucher shows "
+                   "the amount against each account. A voucher's date, type "
+                   "and number repeat on each of its lines."])
+
 
     def _open(self, index) -> None:
         # Read from the row, not from its position: once the table is sorted,
@@ -3446,7 +3472,39 @@ class LedgerScreen(QtWidgets.QWidget):
         self.ledger_box.completer().setFilterMode(QtCore.Qt.MatchContains)
         self.ledger_box.currentTextChanged.connect(self.refresh)
         picker.addWidget(self.ledger_box, 1)
+        # Month by month rather than entry by entry (user asked 2026-10-21).
+        # It lives HERE rather than on a screen of its own because everything
+        # it needs is already on this one - the account, the period, the
+        # opening and closing, print and export - and because clicking a
+        # month means "show me that month", which is this screen again with
+        # its dates narrowed. The Balance Sheet's summary/detailed tick is
+        # the same idea.
+        self.monthly = QtWidgets.QCheckBox("Month by month")
+        self.monthly.setToolTip(
+            "A row for each month, with what moved and where the account "
+            "stood after it. Double-click a month to see only that month.")
+        self.monthly.toggled.connect(self.refresh)
+        picker.addWidget(self.monthly)
         layout.addLayout(picker)
+
+        self.period = PeriodBar()
+        self.period.changed.connect(self.refresh)
+        layout.addWidget(self.period)
+
+        self.caption = flowing(QtWidgets.QLabel())
+        layout.addWidget(self.caption)
+        self.table = FrameTable()
+        self.table.doubleClicked.connect(self._open)
+        layout.addWidget(self.table, 1)
+        self.footer = QtWidgets.QWidget()
+        self.footer_slot = QtWidgets.QVBoxLayout()
+        self.footer_slot.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self.footer_slot)
+        layout.addWidget(ReportActions(self.report))
+        self._frame = pd.DataFrame()
+        self._shown = pd.DataFrame()
+        self._summary = ""
+
 
         self.period = PeriodBar()
         self.period.changed.connect(self.refresh)
@@ -3484,16 +3542,38 @@ class LedgerScreen(QtWidgets.QWidget):
             self.table.load(pd.DataFrame())
             return
         start, end = self.period.range()
-        statement = acc.ledger_statement(int(ledgers.loc[name, "id"]), start, end)
+        ledger_id = int(ledgers.loc[name, "id"])
+        by_month = self.monthly.isChecked()
+        summary = (acc.monthly_summary(ledger_id, start, end) if by_month
+                   else acc.ledger_statement(ledger_id, start, end))
+        # The monthly view answers the same questions about the account, so
+        # the caption, the totals bar and the printed note are shared rather
+        # than written twice - only the table's rows differ.
+        statement = ({**summary, "entries": summary["months"]} if by_month
+                     else summary)
+
         self.caption.setText(
             f"<b>{statement['ledger']}</b> &nbsp; under {statement['group']}"
             f" &nbsp;·&nbsp; Opening {acc.fmt_side(statement['opening'])}"
-            f" &nbsp;·&nbsp; Closing <b>{acc.fmt_side(statement['closing'])}</b>")
+            f" &nbsp;·&nbsp; Closing <b>{acc.fmt_side(statement['closing'])}</b>"
+            + ("  &nbsp;·&nbsp; double-click a month to see only that month"
+               if by_month else ""))
         self._frame = statement["entries"].reset_index(drop=True)
-        shown = self._frame.drop(columns=["voucher_id"]) if not self._frame.empty \
-            else pd.DataFrame(columns=["Date", "Particulars", "Vch Type",
-                                       "Vch No", "Debit", "Credit", "Balance"])
-        self._shown = shown
+        if by_month:
+            # `start` and `end` are each month's own bounds, carried as the
+            # row's KEY so that clicking one can ask for exactly that month.
+            # February is not thirty days.
+            self._shown = self._frame.drop(columns=["start", "end"])
+            keys = list(zip(self._frame["start"], self._frame["end"]))
+        elif self._frame.empty:
+            self._shown = pd.DataFrame(columns=["Date", "Particulars",
+                                                "Vch Type", "Vch No",
+                                                "Debit", "Credit", "Balance"])
+            keys = []
+        else:
+            self._shown = self._frame.drop(columns=["voucher_id"])
+            keys = list(self._frame["voucher_id"])
+        shown = self._shown
         # The screen says this in the caption as HTML and in the totals bar;
         # on paper it has to be one plain line, and it is the whole point of a
         # ledger statement - opening, what moved, closing.
@@ -3503,9 +3583,7 @@ class LedgerScreen(QtWidgets.QWidget):
             f"  ·  Debit {statement['debit_total']:,.2f}"
             f"  ·  Credit {statement['credit_total']:,.2f}"
             f"  ·  Closing {acc.fmt_side(statement['closing'])}")
-        self.table.load(shown, numeric=("Debit", "Credit"),
-                        keys=self._frame["voucher_id"]
-                        if not self._frame.empty else [])
+        self.table.load(shown, numeric=("Debit", "Credit"), keys=keys)
 
         while self.footer_slot.count():
             item = self.footer_slot.takeAt(0)
@@ -3518,11 +3596,16 @@ class LedgerScreen(QtWidgets.QWidget):
 
     def report(self) -> Report:
         name = self.ledger_box.currentText() or "Ledger"
+        by_month = self.monthly.isChecked()
         return Report(
-            title=f"Ledger - {name}",
+            title=f"Ledger - {name}"
+            + (" - month by month" if by_month else ""),
             period=period_caption(self.period),
+            # `Closing` is the monthly view's own money column; naming both
+            # here means one report method serves either shape.
             sections=[ReportSection("", self._shown,
-                                    ("Debit", "Credit", "Balance"))],
+                                    ("Debit", "Credit", "Balance",
+                                     "Closing"))],
             notes=[self._summary])
 
     def _open(self, index) -> None:
@@ -3530,8 +3613,20 @@ class LedgerScreen(QtWidgets.QWidget):
         # screen row 3 is not frame row 3, and this would open whichever
         # voucher happened to land on the line that was clicked.
         key = self.table.key_at(index.row())
-        if key is not None:
-            self.open_voucher.emit(int(key))
+        if key is None:
+            return
+        if self.monthly.isChecked():
+            # A MONTH, not a voucher. Show that month alone - the same screen
+            # with its dates narrowed, which is what "activity for that
+            # specific month only" asks for. Unticked FIRST so that the
+            # refresh `show_period` sets off already draws the entries,
+            # rather than drawing months and being asked again.
+            start, end = key
+            self.monthly.setChecked(False)
+            self.period.show_period(start, end)
+            self.refresh()
+            return
+        self.open_voucher.emit(int(key))
 
 
 class TrialBalanceScreen(QtWidgets.QWidget):
@@ -5042,7 +5137,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.voucher.cancelled.connect(self._back_from_alter)
         self.daybook.open_voucher.connect(self._alter)
         self.ledger.open_voucher.connect(self._alter)
-        self.trial.open_ledger.connect(self._show_ledger)
+        # The trial balance lands on the MONTHS; the other two on the entries.
+        self.trial.open_ledger.connect(
+            lambda name, start, end: self._show_ledger(name, start, end,
+                                                       monthly=True))
+
         self.sheet.open_ledger.connect(self._show_ledger)
         self.profit.open_ledger.connect(self._show_ledger)
         self.outstanding.open_voucher.connect(self._alter)
@@ -5607,7 +5706,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if index is not None and index != 0:
             self.show_screen(index)
 
-    def _show_ledger(self, name: str, start, end) -> None:
+    def _show_ledger(self, name: str, start, end,
+                     monthly: bool = False) -> None:
         """Open the Ledger on an account double-clicked on a report.
 
         Shared by the Trial Balance, the Balance Sheet and the Profit & Loss,
@@ -5627,6 +5727,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"These books have no account called {name}.", 6000)
             return
         self.ledger.ledger_box.setCurrentText(name)
+        # From the TRIAL BALANCE, month by month (user asked 2026-10-21:
+        # "instead of going to ledger i would like to see balance for each
+        # month"). A closing balance tells you where the account ended up;
+        # the months are how you find the one that explains it. From the
+        # other reports it still opens on the entries.
+        self.ledger.monthly.setChecked(monthly)
         self.ledger.period.show_period(start, end)
         # Found by identity rather than written as 2: the screen order is not
         # the same in every build of this app, and a wrong number here would

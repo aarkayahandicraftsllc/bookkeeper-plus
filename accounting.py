@@ -297,8 +297,136 @@ def day_book(date_from=None, date_to=None) -> pd.DataFrame:
                 .reset_index(drop=True)
 
 
-# --------------------------------------------------------------------------- #
-# trial balance
+MONTH_LABEL = "%b %Y"
+
+
+def monthly_summary(ledger_id: int, date_from=None, date_to=None) -> dict:
+    """One account month by month: what moved, and where it stood after.
+
+    Asked for 2026-10-21 - "i would like to see balance for each month and
+    then if i click on that month it should show activity for that specific
+    month only". Reading a closing balance tells you where an account ended
+    up; reading it month by month is how you find the month that explains it.
+
+    EVERY month in the period is listed, including the quiet ones. A month
+    with nothing in it is an answer to "when did this stop moving?", and a
+    table that skips it makes the reader count dates to notice.
+
+    Each row carries `start` and `end`, the month's own bounds, so clicking
+    one can ask for exactly that month without re-deriving which days it
+    covers - a month is not thirty days and February is not always the same
+    length.
+    """
+    ledgers = db.get_ledgers(include_inactive=True).set_index("id")
+    if int(ledger_id) not in ledgers.index:
+        raise ValueError("No such ledger.")
+
+    statement = ledger_statement(ledger_id, date_from, date_to)
+    entries = statement["entries"]
+
+    end = date_to or date.today()
+    if date_from is not None:
+        first = date(date_from.year, date_from.month, 1)
+    elif not entries.empty:
+        earliest = date.fromisoformat(str(entries["Date"].min()))
+        first = date(earliest.year, earliest.month, 1)
+    else:
+        # No start and nothing in the account: the month being looked at is
+        # the only one worth showing.
+        first = date(end.year, end.month, 1)
+
+    months, cursor = [], first
+    while cursor <= end:
+        last = date(cursor.year, cursor.month,
+                    calendar.monthrange(cursor.year, cursor.month)[1])
+        months.append((cursor, min(last, end)))
+        cursor = date(cursor.year + (cursor.month == 12),
+                      1 if cursor.month == 12 else cursor.month + 1, 1)
+
+    rows, running = [], statement["opening"]
+    for start, finish in months:
+        if entries.empty:
+            debit = credit = 0.0
+        else:
+            within = entries[(entries["Date"] >= start.isoformat())
+                             & (entries["Date"] <= finish.isoformat())]
+            debit = round(float(within["Debit"].sum()), 2)
+            credit = round(float(within["Credit"].sum()), 2)
+        running = round(running + debit - credit, 2)
+        rows.append({
+            "Month": start.strftime(MONTH_LABEL),
+            "Debit": debit,
+            "Credit": credit,
+            # The side is spelled out, as it is on the ledger itself: a bare
+            # negative number does not say "credit" to anybody reading a
+            # statement.
+            "Closing": fmt_side(running),
+            "start": start,
+            "end": finish,
+        })
+
+    frame = pd.DataFrame(rows, columns=["Month", "Debit", "Credit", "Closing",
+                                        "start", "end"])
+    return {"ledger": statement["ledger"], "group": statement["group"],
+            "opening": statement["opening"], "closing": statement["closing"],
+            "debit_total": statement["debit_total"],
+            "credit_total": statement["credit_total"],
+            "months": frame}
+
+
+def day_book_lines(date_from=None, date_to=None) -> pd.DataFrame:
+    """Every voucher in the period, one row per LINE rather than per voucher.
+
+    For taking the day book away with you (user asked 2026-10-21: "while
+    exporting daybook not able to see individual amounts for multiline
+    entries"). `day_book` puts a voucher on one row, which means a compound
+    voucher's accounts arrive as "Rent / Electricity / Phone" against a
+    single total - the figure that belongs to each one is nowhere on the
+    page.
+
+    The voucher's date, type and number are REPEATED on each of its lines
+    rather than left blank under the first. That is what makes the export
+    worth having: every row stands on its own, so the file can be sorted by
+    account, filtered to one voucher type, or pivoted, none of which works
+    if half the rows only make sense in the context of the row above.
+
+    Adding the Debit column up still gives the same total as `day_book`'s,
+    since a voucher's total is exactly the sum of its lines - there is no
+    double counting here of the sort the detailed balance sheet has to warn
+    about.
+    """
+    lines = db.get_lines(date_from=date_from, date_to=date_to,
+                         include_voided=True)
+    columns = ["Date", "Vch Type", "Vch No", "Account", "Debit", "Credit",
+               "Narration", "voided", "voucher_id"]
+    if lines.empty:
+        return pd.DataFrame(columns=columns)
+
+    records = []
+    for row in lines.sort_values(["voucher_id", "line_order"]).itertuples():
+        voided = bool(getattr(row, "voided", 0))
+        records.append({
+            "Date": row.voucher_date,
+            "Vch Type": row.voucher_type,
+            "Vch No": int(row.number),
+            "Account": row.ledger_name,
+            # Nil for a voided voucher, exactly as `day_book` shows it: it
+            # moves no value, and a day book that summed its old amounts
+            # would disagree with every other report.
+            "Debit": 0.0 if voided else round(float(row.debit), 2),
+            "Credit": 0.0 if voided else round(float(row.credit), 2),
+            "Narration": row.narration,
+            "voided": voided,
+            "voucher_id": int(row.voucher_id),
+        })
+    frame = pd.DataFrame(records, columns=columns)
+    # Newest voucher first, as the Day Book reads - but a voucher's own lines
+    # keep the order they were entered in, which is the order they balance in.
+    return frame.sort_values(["Date", "Vch No"], ascending=[False, False],
+                             kind="stable").reset_index(drop=True)
+
+
+
 # --------------------------------------------------------------------------- #
 def trial_balance(as_at=None, by_group: bool = False,
                   include_zero: bool = False) -> dict:
