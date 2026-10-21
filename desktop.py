@@ -117,9 +117,31 @@ def from_qdate(value: QtCore.QDate) -> date:
     return date(value.year(), value.month(), value.day())
 
 
+def squeeze(text: str) -> str:
+    """Drop whitespace from ANYWHERE in a figure, not only from its ends.
+
+    Asked for 2026-10-21, for pasted amounts. A figure copied out of a
+    spreadsheet or a bank statement arrives padded, and often with a SPACE as
+    its thousands separator - frequently a non-breaking one, which is what
+    Excel and web pages emit. `float()` refuses all of those, which came back
+    as 0.00 from `parse_amount`, and a line whose amount is zero is dropped
+    from the voucher without a word: "1 000.00" pasted into a cell was a
+    thousand rupees that quietly never happened.
+
+    `str.split()` is what makes it general - it breaks on every kind of
+    whitespace there is, non-breaking and thin spaces included, so no list of
+    characters has to be kept here and got wrong.
+    """
+    return "".join((text or "").split())
+
+
 def parse_amount(text: str) -> float:
-    """Read an amount typed with or without separators. Blank means zero."""
-    cleaned = (text or "").strip().replace(",", "")
+    """Read an amount typed or pasted, with or without separators.
+
+    Blank means zero. So, still, does anything unreadable - see `squeeze` for
+    what that costs and why whitespace in particular is no longer unreadable.
+    """
+    cleaned = squeeze(text).replace(",", "")
     if not cleaned:
         return 0.0
     try:
@@ -1532,6 +1554,9 @@ class VoucherScreen(QtWidgets.QWidget):
         self.grid.horizontalHeader().setSectionResizeMode(
             0, QtWidgets.QHeaderView.Stretch)
         self.grid.verticalHeader().setVisible(False)
+        # Connected FIRST, so the two handlers below read the cleaned figure
+        # rather than the padding it arrived in.
+        self.grid.itemChanged.connect(self._tidy_amount)
         self.grid.itemChanged.connect(self._recalculate)
         self.grid.itemChanged.connect(self._amount_typed)
         # Moving between rows changes whether the Bills button means anything,
@@ -1931,6 +1956,37 @@ class VoucherScreen(QtWidgets.QWidget):
                 + parse_amount(debit.text() if debit else "")
                 - parse_amount(credit.text() if credit else ""), 2)
             cell.setText(acc.fmt_side(running[name]))
+
+    def _tidy_amount(self, item) -> None:
+        """Take the padding off an amount that was pasted rather than typed.
+
+        `parse_amount` already ignores the whitespace, so the voucher adds up
+        either way; this is about the cell you read back afterwards, which
+        should hold the figure and not the spacing it came with.
+
+        Rewritten ONLY when whitespace was actually there. An amount being
+        typed by hand ("500") has to be left exactly as it stands - a cell
+        that reformats itself under the person entering it is worse than one
+        that shows "500" where the line above shows "1,000.00".
+        """
+        if self._loading or item is None or item.column() not in (1, 2):
+            return
+        squeezed = squeeze(item.text())
+        if squeezed == item.text():
+            return
+        amount = parse_amount(squeezed)
+        # Signals blocked: this is a correction to what was just entered, not
+        # a fresh entry, and the suggestion handler must not be told twice
+        # about one change. The slots still to run in THIS emission read the
+        # cell afresh, so they see the tidied figure.
+        self.grid.blockSignals(True)
+        try:
+            # Reformatted when it reads as money; otherwise only de-spaced, so
+            # that something unreadable stays visible to be corrected rather
+            # than being quietly turned into 0.00.
+            item.setText(f"{amount:,.2f}" if amount else squeezed)
+        finally:
+            self.grid.blockSignals(False)
 
     def _amount_typed(self, item) -> None:
         """Offer the balancing amount on the next line.

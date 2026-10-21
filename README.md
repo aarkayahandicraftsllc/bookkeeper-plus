@@ -392,6 +392,22 @@ calling it missing — being told to create it would hand you a second ledger
 under the same name. A **case slip is not a missing account**: ledger names are
 unique, so `bank` is accepted as `Bank`.
 
+### Pasted amounts
+
+An amount is read with **whitespace ignored wherever it sits**, not only at the
+ends, and the cell is tidied to the ordinary form once it lands. That is for
+pasting: a figure copied out of a spreadsheet or a bank statement arrives
+padded, and often with a space as its thousands separator — frequently a
+*non-breaking* space, which is what Excel and web pages emit.
+
+> `1 000.00` used to read as **0.00**, because `float()` refuses it. A line
+> whose amount is zero is left out of the voucher, so a thousand pasted into a
+> cell was a thousand that quietly never happened.
+
+An amount you **type** is left exactly as you typed it — a cell that reformats
+itself under you is its own annoyance — and anything still unreadable after the
+spaces come off keeps its text rather than turning into a confident `0.00`.
+
 ## Structure
 
 It follows Tally's, because the reports fall out of it:

@@ -2004,6 +2004,72 @@ v.reset()
 settle()
 check("an empty line is not an unknown account", v.unknown_accounts(), [])
 
+print("\n23i) A pasted amount has its spaces taken off")
+# Asked 2026-10-21: "amounts should truncate spaces while pasting amounts in
+# voucher entry". The ends were already stripped; a space INSIDE the figure
+# was not, and float() refuses it - so "1 000.00" pasted out of a spreadsheet
+# read as 0.00, and a line whose amount is zero is dropped from the voucher
+# without a word. A thousand rupees that quietly never happened.
+check("a space inside the figure no longer reads as nothing",
+      desktop.parse_amount("1 000.00"), 1000.0)
+check("nor does a NON-BREAKING space, which is what Excel emits",
+      desktop.parse_amount("1\u00a0000.00"), 1000.0)
+check("nor a thin space", desktop.parse_amount("1\u202f000.50"), 1000.5)
+check("padding at the ends still goes", desktop.parse_amount("  500  "), 500.0)
+check("separators and padding together",
+      desktop.parse_amount(" 1,00,000.50 "), 100000.5)
+check("blank is still nothing", desktop.parse_amount("   "), 0.0)
+
+v = window.voucher
+window.show_screen(0)
+v.reset()
+settle()
+set_row(v, 0, "Bank")
+v.grid.item(0, 1).setText("1 000.00")        # as pasted
+settle()
+check("the cell is tidied to the figure it means",
+      v.grid.item(0, 1).text(), "1,000.00")
+check("and the voucher counts it", v.dr_label.text(), "Dr 1,000.00")
+check("the balancing amount is still offered from it",
+      v.grid.item(1, 2).text(), "1,000.00")
+
+# Typed amounts must be left ALONE - a cell that reformats itself under the
+# person entering it is its own annoyance.
+v.reset()
+settle()
+set_row(v, 0, "Bank")
+v.grid.item(0, 1).setText("500")
+settle()
+check("a typed amount is not reformatted", v.grid.item(0, 1).text(), "500")
+
+# Something unreadable keeps its text, so it can be seen and corrected,
+# rather than being turned into a confident 0.00.
+v.grid.item(0, 1).setText("1 0 abc")
+settle()
+check("an unreadable paste is de-spaced but still shown",
+      v.grid.item(0, 1).text(), "10abc")
+
+# End to end: a pasted figure reaches the books as that figure. One line
+# arrives the way a spreadsheet gives it (non-breaking space for the
+# thousands separator), the other padded at both ends.
+v.reset()
+settle()
+v.type_box.setCurrentText("Journal")
+set_row(v, 0, "Bank")
+v.grid.item(0, 1).setText("2\u00a0500.00")
+settle()
+set_row(v, 1, "Capital")
+v.grid.item(1, 2).setText(" 2 500.00 ")
+settle()
+check("a voucher of pasted amounts balances", v.accept_button.isEnabled(), True)
+v.accept_voucher()
+settle()
+_head, pasted_lines = db.get_voucher(db.last_voucher_id("Journal"))
+check("and is posted at the figure that was pasted",
+      sum(float(line["debit"]) for line in pasted_lines), 2500.0)
+v.reset()
+settle()
+
 print("\n24) The shortcuts actually fire, pressed for real")
 # Binding a key is not the same as the key working, which is the whole lesson
 # of the Alt+C bug - so press it for real and see whether the action runs.
