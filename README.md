@@ -798,6 +798,17 @@ indented. The headings and both side totals are identical in the two formats,
 so they can be read against each other line for line — detail is added
 beneath a heading, never instead of it.
 
+**Headings are bold and underlined** in the detailed form, figure included,
+because the indent alone was too quiet to separate a heading from the accounts
+beneath it. Summarised, nothing is emphasised — every line is a heading there,
+so marking them all would say nothing.
+
+> On paper this was worse than on screen, and the same change fixed it: HTML
+> collapses the spaces the indent is made of, so a printed heading and its
+> accounts sat at **exactly the same indent with nothing in bold**. The printed
+> page now bolds the headings and rebuilds the indent with non-breaking spaces.
+> (The spreadsheet already bolded headings and used Excel's own indent.)
+
 One consequence, said on the screen and in the export too: in detailed form
 the Amount column holds **both** a heading's total and its accounts, so
 summing the column gives twice the side. The side totals are the ones to read.

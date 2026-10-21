@@ -2198,8 +2198,51 @@ check("a heading opens nothing", window.stack.currentIndex(), 5)
 check("and says only accounts do",
       "Only the accounts under a heading" in window.statusBar().currentMessage(),
       True)
+
+# Asked 2026-10-21: "while expanding balance sheet headers, please have
+# headers be in bold and underlined so they can easily be difrenciated".
+# The indent alone was too quiet to read.
+bs.refresh()
+settle()
+marks = [(bs.liabilities.key_at(r) is None,
+          bs.liabilities.item(r, 0).font().bold(),
+          bs.liabilities.item(r, 0).font().underline())
+         for r in range(bs.liabilities.rowCount())]
+check("every heading is bold and underlined",
+      all(bold and under for heading, bold, under in marks if heading), True)
+check("and no account is",
+      any(bold or under for heading, bold, under in marks if not heading),
+      False)
+head_row = next(r for r in range(bs.liabilities.rowCount())
+                if bs.liabilities.key_at(r) is None)
+check("the heading's own figure is marked too, not just its name",
+      (bs.liabilities.item(head_row, 1).font().bold(),
+       bs.liabilities.item(head_row, 1).font().underline()), (True, True))
+
+# ON PAPER as well: HTML collapses the indent spaces to nothing, so a
+# printed heading and the accounts under it sat at exactly the same indent
+# with nothing in bold - the report was unreadable in the one form that
+# needed the distinction most.
+printed = desktop.report_html(bs.report(), company="Probe")
+check("the printed heading is bold", "<b>Capital Account</b>" in printed, True)
+check("and the printed account keeps a real indent",
+      "&nbsp;" in printed, True)
+
 bs.detailed.setChecked(False)
 settle()
+flat = [(bs.liabilities.item(r, 0).font().bold(),
+         bs.liabilities.item(r, 0).font().underline())
+        for r in range(bs.liabilities.rowCount())]
+check("summarised, nothing is emphasised - every line is a heading",
+      any(bold or under for bold, under in flat), False)
+check("and the printed summary is left plain",
+      "<b>" in desktop.report_html(bs.report(), company="Probe"), False)
+# Every other report is untouched by the layered treatment.
+window.trial.refresh()
+settle()
+check("the trial balance prints plain",
+      "&nbsp;" in desktop.report_html(window.trial.report(), company="Probe"),
+      False)
 
 print("\n23k) Abandoning an alteration goes back to the report")
 # Asked 2026-10-21: "while i am in ledger an double click on an entry to view

@@ -244,10 +244,19 @@ class FrameTable(QtWidgets.QTableWidget):
 
     def load(self, frame: pd.DataFrame, numeric: tuple[str, ...] = (),
              bold_last: bool = False, keys=None,
-             sortable: bool = True) -> None:
+             sortable: bool = True, headings=None) -> None:
+        """Fill the table from a frame.
+
+        ``headings`` is the row numbers to draw as headings - bold and
+        underlined - for a table that holds two kinds of line at once. The
+        detailed Balance Sheet is the one: a heading and the accounts beneath
+        it sit in the same column, and the indent alone was too quiet to tell
+        them apart (user asked 2026-10-21).
+        """
         raw = frame.reset_index(drop=True)
         frame = shown_dates(raw)
         keys = None if keys is None else list(keys)
+        headings = set() if headings is None else set(headings)
         # Two kinds of table cannot be sorted. One has a pinned total row,
         # which would be carried off into the middle of the figures it
         # totals - the Trial Balance keeps its total in a bar below the
@@ -279,9 +288,13 @@ class FrameTable(QtWidgets.QTableWidget):
                     # Case-folded, or ASCII puts every capital before every
                     # lower-case letter and the order looks arbitrary.
                     item = _Cell(text, text.casefold())
-                if bold_last and row == len(frame) - 1:
+                if (bold_last and row == len(frame) - 1) or row in headings:
                     font = item.font()
                     font.setBold(True)
+                    # The whole row, amount included: the figure beside a
+                    # heading is part of the heading, not one of the accounts
+                    # under it.
+                    font.setUnderline(row in headings)
                     item.setFont(font)
                 self.setItem(row, col, item)
             if keys is not None and self.item(row, 0) is not None:
@@ -584,16 +597,36 @@ def report_html(report: Report, company: str | None = None) -> str:
         right = {column for column in section.numeric
                  if column in frame.columns}
 
-        def cell(tag: str, column, value) -> str:
+        # A section holding BOTH headings and the accounts under them - the
+        # detailed balance sheet is the only one - needs the two told apart
+        # here as well as on screen. Two things had to be fixed for that:
+        # HTML collapses the leading spaces the indent is made of, so on
+        # paper a heading and its accounts printed at exactly the same
+        # indent, and nothing was bold. Qt's engine ignores CSS padding (see
+        # above), so the indent is rebuilt out of non-breaking spaces.
+        layered = any(_cell_text(row[0]).startswith(acc.DETAIL_INDENT)
+                      for row in frame.itertuples(index=False))
+
+        def cell(tag: str, column, value, strong: bool = False,
+                 first: bool = False) -> str:
             side = "right" if column in right else "left"
             shown = "" if pd.isna(value) else html.escape(str(value))
+            if first and layered:
+                bare = shown.lstrip()
+                shown = "&nbsp;" * (len(shown) - len(bare)) + bare
+            if strong:
+                shown = f"<b>{shown}</b>"
             return f"<{tag} style='text-align: {side}'>{shown}</{tag}>"
 
         head = "".join(cell("th", c, c) for c in frame.columns)
-        body = "".join(
-            "<tr>" + "".join(cell("td", c, v)
-                             for c, v in zip(frame.columns, row)) + "</tr>"
-            for row in frame.itertuples(index=False))
+        body = ""
+        for row in frame.itertuples(index=False):
+            strong = layered and not _cell_text(row[0]).startswith(
+                acc.DETAIL_INDENT)
+            body += "<tr>" + "".join(
+                cell("td", column, value, strong=strong, first=(at == 0))
+                for at, (column, value) in enumerate(zip(frame.columns, row))
+            ) + "</tr>"
         parts.append(
             "<table width='100%' cellpadding='4' cellspacing='0' border='1'"
             f" style='border-collapse: collapse'><tr>{head}</tr>"
@@ -3493,12 +3526,16 @@ class BalanceSheetScreen(QtWidgets.QWidget):
         self.liability_label.setText(
             f"<b>Liabilities</b> &nbsp; {money(totals['liabilities'])}")
         self.asset_label.setText(f"<b>Assets</b> &nbsp; {money(totals['assets'])}")
-        self.liabilities.load(sheet["liabilities"], numeric=("Amount",),
-                              sortable=not detailed,
-                              keys=_account_keys(sheet["liabilities"]))
-        self.assets.load(sheet["assets"], numeric=("Amount",),
-                         sortable=not detailed,
-                         keys=_account_keys(sheet["assets"]))
+        for table, side in ((self.liabilities, "liabilities"),
+                            (self.assets, "assets")):
+            keys = _account_keys(sheet[side])
+            # Headings are picked out only in the DETAILED form. Summarised,
+            # every line is a heading, so emphasising them all would say
+            # nothing - there is nothing to tell them apart from.
+            table.load(sheet[side], numeric=("Amount",),
+                       sortable=not detailed, keys=keys,
+                       headings=([row for row, key in enumerate(keys)
+                                  if key is None] if detailed else None))
         self._sides = {"liabilities": sheet["liabilities"],
                        "assets": sheet["assets"]}
         self._totals = dict(totals)
