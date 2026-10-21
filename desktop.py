@@ -3156,8 +3156,11 @@ class LedgerScreen(QtWidgets.QWidget):
 
 class TrialBalanceScreen(QtWidgets.QWidget):
     # Carries the ACCOUNT NAME, not an id: the Ledger screen is keyed by name
-    # (its picker is a name box), and the trial balance rows hold names.
-    open_ledger = QtCore.Signal(str)
+    # (its picker is a name box), and the trial balance rows hold names. The
+    # second argument is the date the figure was read AT - sent with it rather
+    # than fetched from this screen by the window, so that every report
+    # offering this drill-down answers for its own period.
+    open_ledger = QtCore.Signal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3271,7 +3274,7 @@ class TrialBalanceScreen(QtWidgets.QWidget):
                     "\"Summarise by group\" to open an account's ledger.",
                     6000)
             return
-        self.open_ledger.emit(str(key))
+        self.open_ledger.emit(str(key), self.period.range()[1])
 
 
 class ProfitLossScreen(QtWidgets.QWidget):
@@ -3382,7 +3385,34 @@ class ProfitLossScreen(QtWidgets.QWidget):
             f"{'Net profit' if net >= 0 else 'Net loss'} {money(abs(net))}"]
 
 
+def _account_keys(side: pd.DataFrame) -> list:
+    """Which balance-sheet lines are accounts, by name; None for the rest.
+
+    In the detailed form an account is written INDENTED under its heading
+    (`acc.DETAIL_INDENT`), and that indent is the only thing separating the
+    two in the frame - so it is what decides whether a line has a ledger
+    behind it. A heading gets None, and so do the figures the statement works
+    out for itself ("Profit & Loss A/c", "Difference in opening balances"),
+    which carry no indent because they have no accounts under them.
+
+    Deliberately NOT a "is this name a ledger?" lookup. "Profit & Loss A/c"
+    IS a real ledger, but the figure shown against it here is the net profit
+    this statement computed, not that ledger's own balance - so opening it
+    would break the one promise the drill-down makes, that the ledger closes
+    on the number you pointed at.
+    """
+    if side.empty or "Particulars" not in side.columns:
+        return []
+    return [str(name)[len(acc.DETAIL_INDENT):]
+            if str(name).startswith(acc.DETAIL_INDENT) else None
+            for name in side["Particulars"]]
+
+
 class BalanceSheetScreen(QtWidgets.QWidget):
+    # Same drill-down as the Trial Balance's, and the same signature, so one
+    # handler on the window serves both.
+    open_ledger = QtCore.Signal(str, object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
@@ -3411,6 +3441,12 @@ class BalanceSheetScreen(QtWidgets.QWidget):
         self.assets = FrameTable()
         right.addWidget(self.asset_label)
         right.addWidget(self.assets)
+        # Both sides drill down, so the table has to be passed in: there are
+        # two of them and `doubleClicked` says which ROW was hit, not which
+        # table hit it.
+        for table in (self.liabilities, self.assets):
+            table.doubleClicked.connect(
+                lambda index, source=table: self._open(source, index))
         sides.addLayout(left)
         sides.addLayout(right)
         layout.addLayout(sides, 1)
@@ -3458,9 +3494,11 @@ class BalanceSheetScreen(QtWidgets.QWidget):
             f"<b>Liabilities</b> &nbsp; {money(totals['liabilities'])}")
         self.asset_label.setText(f"<b>Assets</b> &nbsp; {money(totals['assets'])}")
         self.liabilities.load(sheet["liabilities"], numeric=("Amount",),
-                              sortable=not detailed)
+                              sortable=not detailed,
+                              keys=_account_keys(sheet["liabilities"]))
         self.assets.load(sheet["assets"], numeric=("Amount",),
-                         sortable=not detailed)
+                         sortable=not detailed,
+                         keys=_account_keys(sheet["assets"]))
         self._sides = {"liabilities": sheet["liabilities"],
                        "assets": sheet["assets"]}
         self._totals = dict(totals)
@@ -3481,6 +3519,27 @@ class BalanceSheetScreen(QtWidgets.QWidget):
             self.status.setText("The two sides do not agree — that should be "
                                 "impossible, please report it.")
             tone(self.status, "bad")
+
+    def _open(self, table: FrameTable, index) -> None:
+        """Double-click an account under a heading to read its ledger.
+
+        Only the indented detail lines have a ledger behind them - see
+        `_account_keys`. The two ways of getting nothing are told apart,
+        because they need different things done about them: in the summary
+        form there are no accounts on screen at all to click.
+        """
+        key = table.key_at(index.row())
+        if key is None:
+            window = self.window()
+            if isinstance(window, QtWidgets.QMainWindow):
+                window.statusBar().showMessage(
+                    "Only the accounts under a heading open a ledger."
+                    if self.detailed.isChecked() else
+                    "These lines are headings — tick \"Show the accounts "
+                    "under each heading\" to open an account's ledger.",
+                    6000)
+            return
+        self.open_ledger.emit(str(key), self.period.range()[1])
 
 
 class OutstandingScreen(QtWidgets.QWidget):
@@ -4570,6 +4629,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.daybook.open_voucher.connect(self._alter)
         self.ledger.open_voucher.connect(self._alter)
         self.trial.open_ledger.connect(self._show_ledger)
+        self.sheet.open_ledger.connect(self._show_ledger)
         self.outstanding.open_voucher.connect(self._alter)
         self.gst.open_voucher.connect(self._alter)
         # The company name is in the title bar and its currency symbol is in
@@ -5132,15 +5192,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if index is not None and index != 0:
             self.show_screen(index)
 
-    def _show_ledger(self, name: str) -> None:
-        """Open the Ledger on an account double-clicked on the Trial Balance.
+    def _show_ledger(self, name: str, as_at: date) -> None:
+        """Open the Ledger on an account double-clicked on a report.
+
+        Shared by the Trial Balance and the Balance Sheet, which is why the
+        date arrives as an argument rather than being read off one of them.
 
         THE PERIOD COMES ACROSS WITH IT. The figure clicked is a balance as at
-        the trial balance's date, so a ledger drawn to any other date closes
-        on a different number - and agreeing with the figure you just pointed
-        at is the whole purpose of the drill-down. The financial year that
-        date falls in supplies the start, since a year of movement is the
-        context wanted behind a closing balance.
+        that report's date, so a ledger drawn to any other date closes on a
+        different number - and agreeing with the figure you just pointed at is
+        the whole purpose of the drill-down. The financial year that date
+        falls in supplies the start, since a year of movement is the context
+        wanted behind a closing balance.
         """
         self.ledger.reload_ledgers()
         if self.ledger.ledger_box.findText(name) < 0:
@@ -5148,7 +5211,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"These books have no account called {name}.", 6000)
             return
         self.ledger.ledger_box.setCurrentText(name)
-        _, as_at = self.trial.period.range()
         self.ledger.period.show_period(acc.fy_bounds(as_at)[0], as_at)
         # Found by identity rather than written as 2: the screen order is not
         # the same in every build of this app, and a wrong number here would

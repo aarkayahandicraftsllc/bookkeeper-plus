@@ -453,6 +453,8 @@ on every report that has something behind it:
 * **Day Book**, **Ledger**, **Outstanding** or the **GST** register → the
   voucher, opened for alteration.
 * **Trial Balance** → that account's **Ledger**.
+* **Balance Sheet**, showing the accounts under each heading → that account's
+  **Ledger**, from either side.
 
 Two details that are easy to get wrong and are worth knowing:
 
@@ -468,9 +470,13 @@ Two details that are easy to get wrong and are worth knowing:
   again by hand. A *new* voucher deliberately stays put: there you are entering
   a run of them.
 
-Summarised by group, the trial balance's lines are groups rather than accounts,
-and a group has no ledger — double-clicking one says so instead of doing
-nothing.
+Lines that are not accounts say so instead of doing nothing: **groups** on a
+trial balance summarised by group, and **headings** on the balance sheet. On
+the balance sheet only the *indented* lines are accounts — which is also why
+**Profit & Loss A/c** does not open, even though a ledger of that name exists.
+The figure shown against it is the net profit this statement worked out, not
+that ledger's own balance, so opening it would break the one promise the
+drill-down makes.
 
 ## Choosing the period
 

@@ -2135,6 +2135,72 @@ check("and says why", "groups, not accounts" in window.statusBar().currentMessag
 tb.by_group.setChecked(False)
 settle()
 
+print("\n23l) Double-click an account on the detailed Balance Sheet too")
+# The same drill-down from the other as-at report. Only the INDENTED lines
+# are accounts: a heading has no ledger, and neither have the figures the
+# statement works out for itself.
+bs = window.sheet
+window.show_screen(5)
+bs.detailed.setChecked(False)
+bs.refresh()
+settle()
+check("summarised, no line offers a ledger",
+      [bs.liabilities.key_at(r) for r in range(bs.liabilities.rowCount())],
+      [None] * bs.liabilities.rowCount())
+bs.liabilities.doubleClicked.emit(bs.liabilities.model().index(0, 0))
+settle()
+check("so a double-click stays put", window.stack.currentIndex(), 5)
+check("and says what to tick",
+      "Show the accounts under each heading"
+      in window.statusBar().currentMessage(), True)
+
+bs.detailed.setChecked(True)
+settle()
+# The first line with a key is an account; the heading above it has none.
+side = bs.liabilities
+rows = [(r, side.key_at(r)) for r in range(side.rowCount())]
+accounts = [(r, k) for r, k in rows if k is not None]
+check("detailed, the indented accounts carry keys", bool(accounts), True)
+check("and the headings still do not",
+      any(k is None for _, k in rows), True)
+check("a key is the account name without its indent",
+      str(accounts[0][1]).startswith(" "), False)
+
+row, account = accounts[0]
+side.doubleClicked.emit(side.model().index(row, 0))
+settle()
+check("double-clicking an account opens the Ledger",
+      window.stack.currentIndex(), 2)
+check("on that account", window.ledger.ledger_box.currentText(), str(account))
+_, bs_as_at = bs.period.range()
+check("drawn to the balance sheet's own date",
+      window.ledger.period.range()[1], bs_as_at)
+
+# The figure on the sheet is the side's own sign, so compare magnitudes: the
+# point is that the ledger answers for the same date, not the same sign
+# convention.
+statement = acc.ledger_statement(db.ledger_id(str(account)),
+                                 *window.ledger.period.range())
+sheet_now = acc.balance_sheet(bs_as_at, detailed=True)["liabilities"]
+shown = float(sheet_now.set_index("Particulars").loc[
+    f"{acc.DETAIL_INDENT}{account}", "Amount"])
+check("and closes on the figure that was pointed at",
+      abs(statement["closing"]), abs(shown))
+
+# A heading row in the detailed form explains itself rather than doing
+# nothing - and does not navigate.
+window.show_screen(5)
+settle()
+heading_row = next(r for r, k in rows if k is None)
+side.doubleClicked.emit(side.model().index(heading_row, 0))
+settle()
+check("a heading opens nothing", window.stack.currentIndex(), 5)
+check("and says only accounts do",
+      "Only the accounts under a heading" in window.statusBar().currentMessage(),
+      True)
+bs.detailed.setChecked(False)
+settle()
+
 print("\n23k) Abandoning an alteration goes back to the report")
 # Asked 2026-10-21: "while i am in ledger an double click on an entry to view
 # and click on cancel edit it land on voucher entry page instead it should
