@@ -372,6 +372,26 @@ creates it without losing the ledger you were part-way through.
 
 The Streamlit version has the same thing as an expander above the grid.
 
+### The account has to exist
+
+The *Particulars* cell is an editable dropdown, so you can find an account by
+typing part of its name — which also means you can type a name that is not an
+account at all. **A voucher cannot be accepted while any line names an account
+that is not in the masters.** The status line says which line and what it says,
+and you either pick from the list or create it with Alt+L.
+
+> This replaces a silent drop. The line was previously left out of the saved
+> voucher, so if the remaining lines happened to balance the voucher was
+> accepted **with that line and its amount missing** — and the screen read
+> "ready to accept" the whole way. The same rule is applied in the method that
+> posts, not only on the Accept button.
+
+Two accounts that look available but are not: a ledger you have **disabled** is
+in the masters yet cannot be posted to, and the message says so rather than
+calling it missing — being told to create it would hand you a second ledger
+under the same name. A **case slip is not a missing account**: ledger names are
+unique, so `bank` is accepted as `Bank`.
+
 ## Structure
 
 It follows Tally's, because the reports fall out of it:

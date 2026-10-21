@@ -1474,6 +1474,9 @@ class VoucherScreen(QtWidgets.QWidget):
         # or the voucher being edited change.
         self._base: dict[str, float] = {}
         self._base_key: tuple | None = None
+        # Filled by reload_ledgers, but read by _recalculate, which the grid
+        # can reach before the first load.
+        self._disabled_names: set[str] = set()
         # The GST facts of the voucher being entered: what the lines cannot
         # say. None until Alt+T has been through.
         self._gst: dict | None = None
@@ -1647,6 +1650,9 @@ class VoucherScreen(QtWidgets.QWidget):
         completer = combo.completer()
         completer.setFilterMode(QtCore.Qt.MatchContains)
         completer.setCompletionMode(QtWidgets.QCompleter.PopupCompletion)
+        # Completion defaults to case-SENSITIVE, so "bank" offered nothing for
+        # "Bank" and the line then read as an account that does not exist.
+        completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
         # The row's bill allocations live on its combo, so they travel with
         # the row when one is inserted or removed above it.
         combo._bills = []
@@ -1694,18 +1700,95 @@ class VoucherScreen(QtWidgets.QWidget):
                                 else self.grid.rowCount() - 1)
             self._recalculate()
 
+    def _ledger_named(self, text: str) -> str | None:
+        """The ledger a typed Particulars cell means, by name, or None.
+
+        Matching is EXACT first, then case-insensitive, because the cell is an
+        editable combo and "bank" is what gets typed for "Bank" - the names
+        are unique, so there is normally exactly one answer, and an ambiguous
+        one is left unresolved rather than guessed at. Surrounding spaces are
+        ignored for the same reason.
+
+        Every place that turns cell text into a ledger goes through here, so
+        the grid, the Balance column and the saved voucher can never disagree
+        about which lines are postable.
+        """
+        name = text.strip()
+        if not name:
+            return None
+        if name in self._ledger_ids:
+            return name
+        folded = name.casefold()
+        matches = [known for known in self._ledger_names
+                   if known.casefold() == folded]
+        return matches[0] if len(matches) == 1 else None
+
+    def unknown_accounts(self) -> list[tuple[int, str]]:
+        """Lines naming an account that cannot be posted to: (line no, text).
+
+        THIS IS WHAT STOPS A LINE BEING THROWN AWAY. The Particulars cell is
+        an editable combo, so any text at all can be left in it, and until
+        2026-10-21 `row_values()` simply SKIPPED a line whose text was not a
+        ledger. A voucher whose remaining lines happened to balance was
+        therefore accepted with that line silently dropped - the account and
+        its amount vanished, with the screen reading Dr 1,000 Cr 1,000 and
+        "ready to accept" throughout. Nothing may be posted while one of
+        these is standing.
+
+        A blank cell is not an unknown account: an empty line is simply not a
+        line, and the grid always keeps a spare one at the bottom.
+        """
+        unknown = []
+        for row in range(self.grid.rowCount()):
+            combo = self.grid.cellWidget(row, 0)
+            text = combo.currentText().strip() if combo else ""
+            if text and self._ledger_named(text) is None:
+                unknown.append((row + 1, text))
+        return unknown
+
+    def _unknown_notice(self, unknown: list[tuple[int, str]]) -> str:
+        """Name the offending lines and both ways out of them.
+
+        The line NUMBER is the point: on a compound voucher "an account is
+        missing" leaves you reading every row to find which.
+        """
+        def joined(items: list[str]) -> str:
+            if len(items) == 1:
+                return items[0]
+            return ", ".join(items[:-1]) + " and " + items[-1]
+
+        if len(unknown) == 1:
+            line, name = unknown[0]
+            # A disabled ledger IS in the masters, so saying it is not there
+            # would send you to create a second one with the same name.
+            if name in self._disabled_names:
+                return (f'Line {line} names "{name}", which is disabled in '
+                        f'the masters. Turn it back on under Masters '
+                        f'(Ctrl+7), or pick another account.')
+            return (f'Line {line} names "{name}", which is not in the '
+                    f'masters. Pick an account from the list, or press Alt+L '
+                    f'to create it.')
+        return ('Lines ' + joined([str(line) for line, _ in unknown])
+                + ' name accounts that cannot be posted to: '
+                + joined([f'"{name}"' for _, name in unknown])
+                + '. Pick each from the list, or press Alt+L to create them.')
+
     def row_values(self) -> list[dict]:
+        """The postable lines. A line naming no known ledger is NOT one.
+
+        Dropping such a line here is only safe because `unknown_accounts()`
+        refuses to let the voucher be accepted while one exists - read that
+        before relying on this.
+        """
         rows = []
         for row in range(self.grid.rowCount()):
             combo = self.grid.cellWidget(row, 0)
-            name = combo.currentText().strip() if combo else ""
+            name = self._ledger_named(combo.currentText() if combo else "")
             debit = parse_amount(self.grid.item(row, 1).text()
                                  if self.grid.item(row, 1) else "")
             credit = parse_amount(self.grid.item(row, 2).text()
                                   if self.grid.item(row, 2) else "")
             if not name or (not debit and not credit):
-                continue
-            if name not in self._ledger_ids:
                 continue
             # The allocations hang off the row's own combo widget, so they
             # follow the row when one is inserted or removed above it. Keyed
@@ -1732,10 +1815,15 @@ class VoucherScreen(QtWidgets.QWidget):
 
         balanced = abs(gap) <= 0.005 and debit > 0 and len(rows) >= 2
         distinct = len({r["ledger_id"] for r in rows}) >= 2
+        # A line naming an account that is not in the masters is left out of
+        # `rows` entirely, so the figures above can read as a balanced voucher
+        # while a line is being dropped. Accept has to answer to the grid, not
+        # only to the lines that survived it.
+        unknown = self.unknown_accounts()
         # This runs on every keystroke, so the voided freeze has to be applied
         # HERE as well as on load - otherwise typing in the grid hands Accept
         # back and the data layer would then refuse the save.
-        self.accept_button.setEnabled(balanced and distinct
+        self.accept_button.setEnabled(balanced and distinct and not unknown
                                       and not self.editing_voided)
 
         self.bills_button.setEnabled(
@@ -1753,6 +1841,12 @@ class VoucherScreen(QtWidgets.QWidget):
                 "to the books, so it is left out of every report. Restore it "
                 "to make it count again, or delete it to give up its number.")
             tone(self.notice, "warn")
+        elif unknown:
+            # Ahead of the balance message on purpose: while a line names an
+            # account that does not exist, what the totals say about the
+            # voucher is not the thing standing between you and accepting it.
+            self.notice.setText(self._unknown_notice(unknown))
+            tone(self.notice, "bad")
         elif not rows:
             self.notice.setText(
                 "Pick a ledger on each line, then put the amount under Debit or "
@@ -1826,8 +1920,8 @@ class VoucherScreen(QtWidgets.QWidget):
             cell = self.grid.item(row, 3)
             if cell is None:
                 continue
-            name = combo.currentText().strip() if combo else ""
-            if not name or name not in self._ledger_ids:
+            name = self._ledger_named(combo.currentText() if combo else "")
+            if not name:
                 cell.setText("")
                 continue
             debit = self.grid.item(row, 1)
@@ -1998,6 +2092,14 @@ class VoucherScreen(QtWidgets.QWidget):
         self._ledger_names = list(self._ledgers["name"])
         self._ledger_ids = dict(zip(self._ledgers["name"],
                                     self._ledgers["id"].astype(int)))
+        # A DISABLED ledger is in the masters but cannot be posted to, so it
+        # is absent from _ledger_ids and from the dropdown. Held separately
+        # only so that typing one's name is answered with "disabled" instead
+        # of the misleading "not in the masters", which would send you to
+        # create a second ledger under the same name.
+        every = db.get_ledgers(include_inactive=True)
+        self._disabled_names = (set(every["name"]) - set(self._ledger_names)
+                                if not every.empty else set())
 
     def reset(self) -> None:
         self._loading = True
@@ -2447,6 +2549,15 @@ class VoucherScreen(QtWidgets.QWidget):
         self._finish("Voucher deleted — its number has been given up.")
 
     def accept_voucher(self) -> None:
+        # The backstop. Accept is already disabled while a line names an
+        # unknown account, and Ctrl+A goes through that button - but this is
+        # the method that posts, and the one line it must never do is save a
+        # voucher that is missing a line the person typed.
+        unknown = self.unknown_accounts()
+        if unknown:
+            QtWidgets.QMessageBox.warning(self, "Cannot accept",
+                                          self._unknown_notice(unknown))
+            return
         rows = self.row_values()
         try:
             db.save_voucher(

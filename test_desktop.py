@@ -1910,6 +1910,100 @@ if len(names) == len(set(names)):
 v.reset()
 settle()
 
+print("\n23h) An account that is not in the masters cannot be posted")
+# Asked 2026-10-21 in Bookkeeper and ported here. The Particulars cell is an
+# editable combo, so ANY text can be left in it, and `row_values()` used to
+# skip such a line silently - so a voucher whose remaining lines happened to
+# balance was accepted with the typed line THROWN AWAY, the amount gone, the
+# screen having read Dr 1,000 Cr 1,000 and offered Accept throughout.
+db.use_company(TMP)
+v = window.voucher
+window.show_screen(0)
+v.reset()
+settle()
+
+v.type_box.setCurrentText("Journal")
+set_row(v, 0, "Bank", debit=1000)
+set_row(v, 1, "Rent Paid", debit=500)        # no such ledger
+settle()
+set_row(v, 2, "Capital", credit=1000)        # the other two balance by themselves
+settle()
+check("the offending line is reported, with its number",
+      v.unknown_accounts(), [(2, "Rent Paid")])
+check("Accept is refused although the other lines balance",
+      v.accept_button.isEnabled(), False)
+check("the notice names the line and what was typed",
+      "line 2" in v.notice.text().lower() and '"Rent Paid"' in v.notice.text(),
+      True)
+check("and offers the way out", "Alt+L" in v.notice.text(), True)
+
+# The refusal has to hold in the method that POSTS, not only in the button:
+# that is the one place a line must never be dropped.
+_real_warning = QtWidgets.QMessageBox.warning
+_refusals = []
+QtWidgets.QMessageBox.warning = staticmethod(
+    lambda *a, **k: _refusals.append(a[1:]) or QtWidgets.QMessageBox.Ok)
+WIDE = (date(2000, 1, 1), date.today() + timedelta(days=4000))
+before = len(acc.day_book(*WIDE))
+v.accept_voucher()
+settle()
+check("accept_voucher posts nothing while a line names no account",
+      len(acc.day_book(*WIDE)), before)
+check("and says why rather than failing quietly", bool(_refusals), True)
+QtWidgets.QMessageBox.warning = _real_warning
+
+# Fixed by picking a real account: the line that was being dropped is saved.
+set_row(v, 1, "Capital", debit=500)
+set_row(v, 2, "Capital", credit=1500)
+settle()
+check("picking a real account lifts the refusal", v.unknown_accounts(), [])
+check("and hands Accept back", v.accept_button.isEnabled(), True)
+v.accept_voucher()
+settle()
+_head, saved_lines = db.get_voucher(db.last_voucher_id("Journal"))
+check("all three typed lines reach the books", len(saved_lines), 3)
+check("carrying all of the money",
+      sum(float(line["debit"]) for line in saved_lines), 1500.0)
+
+# A case slip is the SAME account, not a missing one - the names are unique.
+v.reset()
+settle()
+set_row(v, 0, "bank", debit=250)
+set_row(v, 1, "capital", credit=250)
+settle()
+check("the same name in the wrong case is not an unknown account",
+      v.unknown_accounts(), [])
+check("it resolves to the real ledger",
+      [r["ledger_id"] for r in v.row_values()],
+      [db.ledger_id("Bank"), db.ledger_id("Capital")])
+check("so its balance appears like any other",
+      v.grid.item(0, 3).text() != "", True)
+
+# A DISABLED ledger is in the masters but cannot be posted to. Saying it is
+# missing would send you to create a second ledger under the same name.
+db.add_ledger("Closed Account", "Sundry Debtors")
+closed = db.ledger_id("Closed Account")
+db.update_ledger(closed, "Closed Account", "Sundry Debtors", 0, "Dr",
+                 active=False)
+v.reset()                                    # reloads the ledger lists
+settle()
+set_row(v, 0, "Closed Account", debit=100)
+set_row(v, 1, "Bank", credit=100)
+settle()
+check("a disabled ledger is refused too", v.accept_button.isEnabled(), False)
+check("but is called disabled, not missing",
+      "disabled" in v.notice.text(), True)
+db.update_ledger(closed, "Closed Account", "Sundry Debtors", 0, "Dr",
+                 active=True)
+
+many = v._unknown_notice([(2, "Tea"), (4, "Rent")])
+check("several are named together in one message",
+      "Lines 2 and 4" in many and '"Tea"' in many and '"Rent"' in many, True)
+
+v.reset()
+settle()
+check("an empty line is not an unknown account", v.unknown_accounts(), [])
+
 print("\n24) The shortcuts actually fire, pressed for real")
 # Binding a key is not the same as the key working, which is the whole lesson
 # of the Alt+C bug - so press it for real and see whether the action runs.
