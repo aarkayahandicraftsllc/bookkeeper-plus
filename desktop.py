@@ -97,11 +97,21 @@ DATE_COLUMNS = ("Date", "Due")
 # Declared rather than guessed, because width cannot tell the two apart - in
 # a book of short ledger names a date needs ten characters and a particulars
 # line eleven. Add a column here only if its content has a known shape.
-# `Balance` is here, not in a `numeric` tuple, because on screen it is TEXT:
-# the ledger carries "102,984.50 Dr", a figure with its side attached. Known
-# shape all the same.
-NARROW_COLUMNS = DATE_COLUMNS + ("Vch Type", "Vch No", "Status", "Balance")
+# `Balance`, `Opening` and `Closing` are here, not in a `numeric` tuple,
+# because on screen they are TEXT: a ledger carries "102,984.50 Dr", a figure
+# with its side attached. Known shape all the same. `Dr/Cr` holds two
+# characters.
+NARROW_COLUMNS = DATE_COLUMNS + ("Vch Type", "Vch No", "Status", "Balance",
+                                 "Opening", "Closing", "Dr/Cr")
 
+# A column needing fewer characters than this is never stretched, whatever
+# else is true of it. THE DECLARATION ABOVE CANNOT BE TRUSTED TO BE COMPLETE
+# - it was missing `Balance`, and then `Dr/Cr` and `Closing`, and each
+# omission put a two-character column on screen 385px wide with its contents
+# adrift at the left (user reported exactly that on Masters, 2026-10-21). A
+# floor means the next column nobody remembered degrades to merely
+# unstretched rather than to absurd.
+FLEX_CHARS = 13
 
 
 def shown_dates(frame: pd.DataFrame) -> pd.DataFrame:
@@ -246,10 +256,21 @@ class FrameTable(QtWidgets.QTableWidget):
         self.setSortingEnabled(False)
         self._sort: tuple[int, QtCore.Qt.SortOrder] | None = None
         self._pinned_last = False
+        # Columns are INTERACTIVE so they can be dragged (user asked
+        # 2026-10-21). That means their widths are ours to work out rather
+        # than Qt's, which `_fit_columns` does - on load and on every resize,
+        # for as long as the user has not taken a column over.
+        self._widths: dict[str, int] = {}     # widths the USER dragged to
+        self._columns: list[str] = []
+        self._numeric: tuple[str, ...] = ()
+        self._needs: list[int] = []
+        self._fitting = False                 # our own resizing, not theirs
         header = self.horizontalHeader()
         header.setSortIndicatorShown(True)
         header.setSectionsClickable(True)
         header.sectionClicked.connect(self.sort_by)
+        header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        header.sectionResized.connect(self._column_dragged)
 
     def sort_by(self, column: int) -> None:
         """Sort by a column; clicking the same one again reverses it."""
@@ -339,39 +360,103 @@ class FrameTable(QtWidgets.QTableWidget):
             self.sortItems(*self._sort)
             self.horizontalHeader().setSortIndicator(*self._sort)
 
-        header = self.horizontalHeader()
-        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-        if len(frame.columns):
-            # The columns with a lot to say SHARE the slack; the rest are
-            # sized to their contents, which for a date, a voucher type or an
-            # amount is a known and modest width.
-            #
-            # Measured in characters, which is enough to choose between
-            # columns; the actual widths are still Qt's.
-            def room_for(index: int) -> int:
-                column = frame.columns[index]
-                if column in numeric:
-                    return -1               # amounts are a known width
-                lengths = [len(str(v)) for v in frame[column]]
-                return max(lengths + [len(str(column))])
+        self._columns = [str(column) for column in frame.columns]
+        self._numeric = tuple(str(column) for column in numeric)
+        self._needs = [self._room_for(frame, column) for column in self._columns]
+        self._fit_columns()
 
-            # WHICH columns flex is decided by their SHAPE, not by how wide
-            # they happen to be in these books. Width cannot tell them
-            # apart: in a book of short ledger names `Date` needs 10
-            # characters and `Particulars` 11, so any "stretch the wide
-            # ones" rule hands a ten-character date the slack - the very bug
-            # this code was written to fix. A date, a voucher type and a
-            # voucher number have a known shape; a ledger name, a list of
-            # them, or a particulars line does not.
-            flexible = [index for index, column in enumerate(frame.columns)
-                        if str(column) not in numeric
-                        and str(column) not in NARROW_COLUMNS]
-            # Nothing but fields of known width: give the slack to the widest
-            # rather than leave a gap down the right-hand side.
-            for index in flexible or [max(range(len(frame.columns)),
-                                          key=room_for)]:
-                header.setSectionResizeMode(
-                    index, QtWidgets.QHeaderView.Stretch)
+    # --- column widths ---------------------------------------------------- #
+    # Sized by us rather than by Qt, because the sections are INTERACTIVE so
+    # that they can be dragged (user asked 2026-10-21). Qt's own
+    # ResizeToContents and Stretch both do a decent job and neither can be
+    # dragged at all.
+    def _room_for(self, frame: pd.DataFrame, column: str) -> int:
+        """How many characters this column needs to show everything it holds."""
+        if column not in frame.columns:
+            return len(column)
+        lengths = [len(_cell_text(value)) for value in frame[column]]
+        return max(lengths + [len(column)])
+
+    def _flexible(self) -> list[int]:
+        """Which columns should absorb the table's spare width.
+
+        Decided by the column's SHAPE, not by how wide it happens to be in
+        these books: width cannot tell them apart, since in a book of short
+        ledger names `Date` needs ten characters and `Particulars` eleven.
+        A date, a voucher type, a voucher number, a figure - all known
+        shapes, all sized to their contents. A ledger name, or a list of
+        them, is not.
+        """
+        candidates = [index for index, column in enumerate(self._columns)
+                      if column not in self._numeric
+                      and column not in NARROW_COLUMNS]
+        # ...and of those, only the ones with enough to say. A column of
+        # names in a book of SHORT names does not need the slack, and taking
+        # it is how a column nobody listed ends up absurdly wide: `Dr/Cr`
+        # holds two characters and was handed 385px on Masters.
+        wide = [index for index in candidates
+                if self._needs[index] >= FLEX_CHARS]
+        if wide:
+            return wide
+        if candidates:
+            # Rather than leave a gap down the right-hand side. Chosen from
+            # the candidates, so a date or a figure can never win it.
+            return [max(candidates, key=lambda index: self._needs[index])]
+        return []
+
+    def _column_dragged(self, index: int, _old: int, new: int) -> None:
+        """Remember a width the USER chose, by column NAME.
+
+        By name rather than by position, because a report can be re-ordered
+        by sorting and reloaded with its columns in a different arrangement -
+        and because a remembered width should follow the column it was meant
+        for.
+        """
+        if self._fitting or index >= len(self._columns):
+            return
+        self._widths[self._columns[index]] = new
+
+    def _fit_columns(self) -> None:
+        """Lay the columns out to fill the table, without scrolling sideways.
+
+        Called on load AND on every resize, because interactive sections do
+        not follow the window by themselves. A column the user has dragged is
+        left exactly where they put it - theirs outranks ours, and keeping it
+        through a refresh is the same courtesy the chosen sort already gets.
+        """
+        if not self._columns:
+            return
+        digit = max(1, self.fontMetrics().horizontalAdvance("0"))
+        padding = digit * 3
+        natural = [need * digit + padding for need in self._needs]
+        flexible = set(self._flexible())
+        floor = digit * 10
+
+        spare = self.viewport().width() - sum(
+            natural[index] for index in range(len(self._columns))
+            if index not in flexible)
+        share = sum(natural[index] for index in flexible)
+
+        self._fitting = True
+        try:
+            for index, column in enumerate(self._columns):
+                if column in self._widths:
+                    self.setColumnWidth(index, self._widths[column])
+                    continue
+                if index not in flexible:
+                    self.setColumnWidth(index, natural[index])
+                    continue
+                # Shared in proportion to how much each has to say, so two
+                # account columns come out alike and a long particulars line
+                # outweighs a short one.
+                wanted = (spare * natural[index] / share) if share else spare
+                self.setColumnWidth(index, max(floor, int(wanted)))
+        finally:
+            self._fitting = False
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_columns()
 
 
 def mono_font() -> QtGui.QFont:
@@ -3222,7 +3307,7 @@ class PeriodBar(QtWidgets.QWidget):
         chosen = self.year_box.currentData()
         return chosen if isinstance(chosen, acc.FinancialYear) else None
 
-    def show_period(self, start: date, end: date) -> None:
+    def show_period(self, start: date | None, end: date) -> None:
         """Point the bar at a period decided elsewhere, NAMING it if it is one.
 
         For one report handing you to another - double-clicking an account on
@@ -3233,7 +3318,16 @@ class PeriodBar(QtWidgets.QWidget):
         A period that happens to be a whole financial year selects that year
         in the dropdown rather than reading "Custom dates" over dates that do
         have a name, which is the same rule `_date_typed` applies in reverse.
+
+        ``start`` of None means since the books began, which is one of the
+        entries in the dropdown rather than a date.
         """
+        if start is None:
+            index = self.year_box.findText(self.SINCE)
+            if index >= 0:
+                self.year_box.setCurrentIndex(index)
+                self._apply(self.ALL)
+                return
         for index in range(self.year_box.count()):
             year = self.year_box.itemData(index)
             if (isinstance(year, acc.FinancialYear)
@@ -3443,10 +3537,11 @@ class LedgerScreen(QtWidgets.QWidget):
 class TrialBalanceScreen(QtWidgets.QWidget):
     # Carries the ACCOUNT NAME, not an id: the Ledger screen is keyed by name
     # (its picker is a name box), and the trial balance rows hold names. The
-    # second argument is the date the figure was read AT - sent with it rather
-    # than fetched from this screen by the window, so that every report
-    # offering this drill-down answers for its own period.
-    open_ledger = QtCore.Signal(str, object)
+    # the PERIOD the figure was read over - sent with it rather than fetched
+    # from this screen by the window, so that every report offering this
+    # drill-down answers for its own. A start of None means since the books
+    # began; an as-at report sends the opening of the year it falls in.
+    open_ledger = QtCore.Signal(str, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3560,10 +3655,18 @@ class TrialBalanceScreen(QtWidgets.QWidget):
                     "\"Summarise by group\" to open an account's ledger.",
                     6000)
             return
-        self.open_ledger.emit(str(key), self.period.range()[1])
+        as_at = self.period.range()[1]
+        self.open_ledger.emit(str(key), acc.fy_bounds(as_at)[0], as_at)
 
 
 class ProfitLossScreen(QtWidgets.QWidget):
+    # Same drill-down again (user asked 2026-10-21: "diuble click
+    # functionality in profit and loss as well"). Simpler here than on the
+    # other two: EVERY row of a profit and loss account is a ledger, so there
+    # are no headings to tell apart - but there are FOUR tables, and the
+    # period is a span rather than a moment.
+    open_ledger = QtCore.Signal(str, object, object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
@@ -3592,6 +3695,13 @@ class ProfitLossScreen(QtWidgets.QWidget):
         indirect = QtWidgets.QHBoxLayout()
         self.indirect_expense = FrameTable()
         self.indirect_income = FrameTable()
+        for table in (self.trading_expense, self.trading_income,
+                      self.indirect_expense, self.indirect_income):
+            # The table is captured per connection: `doubleClicked` says
+            # which row was hit, not which of the four hit it.
+            table.doubleClicked.connect(
+                lambda index, source=table: self._open(source, index))
+
         indirect.addWidget(self.indirect_expense)
         indirect.addWidget(self.indirect_income)
         layout.addLayout(indirect, 1)
@@ -3623,6 +3733,27 @@ class ProfitLossScreen(QtWidgets.QWidget):
                       for label, key in order],
             notes=self._lines)
 
+    def _fill(self, table: FrameTable, part: pd.DataFrame,
+              blank: pd.DataFrame) -> None:
+        """One of the four tables, keyed by account name for the drill-down."""
+        frame = blank if part.empty else part
+        table.load(frame, numeric=("Amount",),
+                   keys=(frame["Particulars"] if not frame.empty else []))
+
+    def _open(self, table: FrameTable, index) -> None:
+        """Double-click an account to read its ledger, OVER THIS PERIOD.
+
+        A profit and loss account is drawn over a span, not at a moment, so
+        the ledger opens over that same span - the account's movement here is
+        the figure that was clicked, and a ledger drawn over any other period
+        does not add up to it.
+        """
+        key = table.key_at(index.row())
+        if key is None:
+            return
+        start, end = self.period.range()
+        self.open_ledger.emit(str(key), start, end)
+
     def refresh(self) -> None:
         start, end = self.period.range()
         report = acc.profit_and_loss(start, end)
@@ -3633,12 +3764,8 @@ class ProfitLossScreen(QtWidgets.QWidget):
             f"<b>Trading account</b> &nbsp; purchases and direct expenses "
             f"{money(totals['trading_expense'])} &nbsp;|&nbsp; sales and direct "
             f"incomes {money(totals['trading_income'])}")
-        self.trading_expense.load(
-            report["trading_expense"] if not report["trading_expense"].empty else blank,
-            numeric=("Amount",))
-        self.trading_income.load(
-            report["trading_income"] if not report["trading_income"].empty else blank,
-            numeric=("Amount",))
+        self._fill(self.trading_expense, report["trading_expense"], blank)
+        self._fill(self.trading_income, report["trading_income"], blank)
         gross = totals["gross_profit"]
         self.gross_label.setText(
             f"<b>{'Gross profit' if gross >= 0 else 'Gross loss'}: "
@@ -3648,12 +3775,8 @@ class ProfitLossScreen(QtWidgets.QWidget):
             f"<b>Profit &amp; loss account</b> &nbsp; indirect expenses "
             f"{money(totals['indirect_expense'])} &nbsp;|&nbsp; indirect incomes "
             f"{money(totals['indirect_income'])}")
-        self.indirect_expense.load(
-            report["indirect_expense"] if not report["indirect_expense"].empty
-            else blank, numeric=("Amount",))
-        self.indirect_income.load(
-            report["indirect_income"] if not report["indirect_income"].empty
-            else blank, numeric=("Amount",))
+        self._fill(self.indirect_expense, report["indirect_expense"], blank)
+        self._fill(self.indirect_income, report["indirect_income"], blank)
         net = totals["net_profit"]
         self.net_label.setText(
             f"<b>{'Net profit' if net >= 0 else 'Net loss'}: {money(abs(net))}</b>")
@@ -3697,7 +3820,7 @@ def _account_keys(side: pd.DataFrame) -> list:
 class BalanceSheetScreen(QtWidgets.QWidget):
     # Same drill-down as the Trial Balance's, and the same signature, so one
     # handler on the window serves both.
-    open_ledger = QtCore.Signal(str, object)
+    open_ledger = QtCore.Signal(str, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3829,7 +3952,8 @@ class BalanceSheetScreen(QtWidgets.QWidget):
                     "under each heading\" to open an account's ledger.",
                     6000)
             return
-        self.open_ledger.emit(str(key), self.period.range()[1])
+        as_at = self.period.range()[1]
+        self.open_ledger.emit(str(key), acc.fy_bounds(as_at)[0], as_at)
 
 
 class OutstandingScreen(QtWidgets.QWidget):
@@ -4920,6 +5044,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ledger.open_voucher.connect(self._alter)
         self.trial.open_ledger.connect(self._show_ledger)
         self.sheet.open_ledger.connect(self._show_ledger)
+        self.profit.open_ledger.connect(self._show_ledger)
         self.outstanding.open_voucher.connect(self._alter)
         self.gst.open_voucher.connect(self._alter)
         # The company name is in the title bar and its currency symbol is in
@@ -5482,18 +5607,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if index is not None and index != 0:
             self.show_screen(index)
 
-    def _show_ledger(self, name: str, as_at: date) -> None:
+    def _show_ledger(self, name: str, start, end) -> None:
         """Open the Ledger on an account double-clicked on a report.
 
-        Shared by the Trial Balance and the Balance Sheet, which is why the
-        date arrives as an argument rather than being read off one of them.
+        Shared by the Trial Balance, the Balance Sheet and the Profit & Loss,
+        which is why the PERIOD arrives as arguments rather than being read
+        off one of them - the first two are drawn AT a date and the third
+        OVER one, and each has to hand over its own.
 
-        THE PERIOD COMES ACROSS WITH IT. The figure clicked is a balance as at
-        that report's date, so a ledger drawn to any other date closes on a
-        different number - and agreeing with the figure you just pointed at is
-        the whole purpose of the drill-down. The financial year that date
-        falls in supplies the start, since a year of movement is the context
-        wanted behind a closing balance.
+        THE PERIOD COMES ACROSS WITH IT, which is the whole purpose of the
+        drill-down: a ledger drawn over any other period does not answer for
+        the figure that was just pointed at. The as-at reports send the
+        opening of the year their date falls in, since a year of movement is
+        the context wanted behind a closing balance.
         """
         self.ledger.reload_ledgers()
         if self.ledger.ledger_box.findText(name) < 0:
@@ -5501,7 +5627,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"These books have no account called {name}.", 6000)
             return
         self.ledger.ledger_box.setCurrentText(name)
-        self.ledger.period.show_period(acc.fy_bounds(as_at)[0], as_at)
+        self.ledger.period.show_period(start, end)
         # Found by identity rather than written as 2: the screen order is not
         # the same in every build of this app, and a wrong number here would
         # quietly show a different report.

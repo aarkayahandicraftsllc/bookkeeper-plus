@@ -455,15 +455,22 @@ on every report that has something behind it:
 * **Trial Balance** → that account's **Ledger**.
 * **Balance Sheet**, showing the accounts under each heading → that account's
   **Ledger**, from either side.
+* **Profit & Loss** → that account's **Ledger**, from any of its four tables.
+  Every row there is already an account, so there is nothing to tick first.
+
 
 Two details that are easy to get wrong and are worth knowing:
 
-* **The period travels with you.** The figure you clicked on the trial balance
-  is a balance *as at* its date, so the ledger opens drawn **to that same
-  date** — it closes on the number you just pointed at, which is the only
-  reason to drill into it. The start comes from the financial year that date
-  falls in, because a year of movement is the context you want behind a
-  closing balance.
+* **The period travels with you**, and each report hands over its own.
+  A figure on the trial balance or the balance sheet is a balance *as at*
+  their date, so the ledger opens drawn **to that same date** — it closes on
+  the number you just pointed at, which is the only reason to drill into it.
+  The start comes from the financial year that date falls in, because a year
+  of movement is the context you want behind a closing balance. A figure on
+  the **Profit & Loss** is movement **over a span**, so the ledger opens over
+  that same span, where its debits less its credits come to exactly the
+  figure you clicked.
+
 * **Finishing with a voucher puts you back where you came from** — whether you
   *accept* the alteration or *abandon* it. Giving up on an alteration used to
   leave you on an empty entry form, with the report you were reading to find
@@ -812,10 +819,27 @@ A report table sizes each column to its contents, except the ones holding
 **names**, which share whatever width is left over. That is what keeps a
 report inside the window instead of scrolling sideways.
 
+**Drag any column header to set a width yourself.** What you drag to is
+remembered **by column name** and **survives a refresh** — the same courtesy
+the chosen sort gets, since posting a voucher should not undo how you arranged
+the report. The columns you have not touched go on being sized by the app.
+
+> Dragging is why the widths are worked out here rather than left to Qt: its
+> own `ResizeToContents` and `Stretch` both size columns well and **neither
+> can be dragged at all**. So the table sizes itself on load and on every
+> resize, and stops doing so for a column once you have taken it over.
+
 Which columns flex is decided by their **shape**, listed in
 `desktop.NARROW_COLUMNS` — a date, a voucher type, a voucher number, a status
-word and a `Balance` all have a known width. Everything else holds a name, or
-a list of names, of no fixed length.
+word, and `Opening` / `Closing` / `Balance` / `Dr/Cr` all have a known width.
+Everything else holds a name, or a list of names, of no fixed length.
+
+There is also a **floor** (`FLEX_CHARS`): a column needing fewer characters
+than that never takes the slack, whatever else is true of it. **That list
+cannot be trusted to be complete** — it was missing `Balance`, and then
+`Dr/Cr` and `Closing`, and each omission put a two-character column on screen
+**385px wide with its contents adrift at the left**. The floor means the next
+column nobody remembered degrades to merely unstretched rather than to absurd.
 
 > **Width cannot make that decision**, which is the trap here. In a book of
 > short ledger names `Date` needs ten characters and `Particulars` eleven, so
