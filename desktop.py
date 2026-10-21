@@ -1480,6 +1480,11 @@ class VoucherScreen(QtWidgets.QWidget):
     # back to the report it was opened from. A new voucher deliberately
     # does not: there you are entering a run of them.
     altered = QtCore.Signal()
+    # Raised when an alteration (or a copy) is ABANDONED from the button. It
+    # goes to the same place `altered` does: either way you have finished with
+    # the voucher you went in to look at, and leaving you on an empty entry
+    # form means finding your way back to the report by hand.
+    cancelled = QtCore.Signal()
     masters_changed = QtCore.Signal()
 
     def __init__(self, parent=None):
@@ -1641,7 +1646,7 @@ class VoucherScreen(QtWidgets.QWidget):
         # out of it but to accept it or empty the lines by hand. The wording
         # follows which of the two it is.
         self.cancel_button = QtWidgets.QPushButton(CANCEL_EDIT)
-        self.cancel_button.clicked.connect(self.reset)
+        self.cancel_button.clicked.connect(self.cancel_edit)
         self.cancel_button.setVisible(False)
         bottom.addWidget(self.cancel_button)
         bottom.addWidget(self.accept_button)
@@ -2178,6 +2183,18 @@ class VoucherScreen(QtWidgets.QWidget):
         self._add_row()
         self._add_row()
         self._type_changed(self.type_box.currentText())
+
+    def cancel_edit(self) -> None:
+        """Abandon this alteration or copy, and leave where saving would leave.
+
+        The going-back CANNOT live in `reset()`: that is called after
+        accepting, when the books change under the screen, on a company
+        switch and from the constructor, and every one of those would then
+        navigate. It hangs off the button instead, which is the only place
+        the user means "I am done with this voucher".
+        """
+        self.reset()
+        self.cancelled.emit()
 
     def _update_copy_button(self) -> None:
         """Say which voucher the button would copy, and whether there is one."""
@@ -2919,6 +2936,36 @@ class PeriodBar(QtWidgets.QWidget):
         chosen = self.year_box.currentData()
         return chosen if isinstance(chosen, acc.FinancialYear) else None
 
+    def show_period(self, start: date, end: date) -> None:
+        """Point the bar at a period decided elsewhere, NAMING it if it is one.
+
+        For one report handing you to another - double-clicking an account on
+        the Trial Balance opens its Ledger - where the second report has to
+        cover the period of the figure that was clicked, or it closes on a
+        different number from the one just pointed at.
+
+        A period that happens to be a whole financial year selects that year
+        in the dropdown rather than reading "Custom dates" over dates that do
+        have a name, which is the same rule `_date_typed` applies in reverse.
+        """
+        for index in range(self.year_box.count()):
+            year = self.year_box.itemData(index)
+            if (isinstance(year, acc.FinancialYear)
+                    and year.start == start and year.end == end):
+                if index == self.year_box.currentIndex():
+                    self._apply(year)        # already there: emits nothing
+                else:
+                    self.year_box.setCurrentIndex(index)
+                return
+        self._quiet = True
+        if self.with_from:
+            self.from_edit.setEnabled(True)
+            self.from_edit.setDate(to_qdate(start))
+        self.to_edit.setDate(to_qdate(end))
+        self._quiet = False
+        self._mark_custom()
+        self.changed.emit()
+
     def range(self) -> tuple[date | None, date]:
         """The period, as ``accounting`` wants it: None means no start date."""
         if self.year_box.currentData() == self.ALL or not self.with_from:
@@ -3108,6 +3155,10 @@ class LedgerScreen(QtWidgets.QWidget):
 
 
 class TrialBalanceScreen(QtWidgets.QWidget):
+    # Carries the ACCOUNT NAME, not an id: the Ledger screen is keyed by name
+    # (its picker is a name box), and the trial balance rows hold names.
+    open_ledger = QtCore.Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
@@ -3131,6 +3182,10 @@ class TrialBalanceScreen(QtWidgets.QWidget):
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.table = FrameTable()
+        # Double-click an account to read its ledger (user asked 2026-10-21) -
+        # the same gesture the Day Book and the Ledger already use to open
+        # what is behind a line.
+        self.table.doubleClicked.connect(self._open)
         layout.addWidget(self.table, 1)
         # The total used to be the last ROW of the table, bold. It moved out
         # here so the table can be sorted by clicking a header: a total row
@@ -3172,7 +3227,12 @@ class TrialBalanceScreen(QtWidgets.QWidget):
             # balance without its total is not a trial balance.
             self._shown = pd.concat([rows, pd.DataFrame([total])],
                                     ignore_index=True)
-            self.table.load(rows, numeric=("Debit", "Credit"))
+            # Keyed by account name so a double-click opens the right ledger
+            # after the table has been sorted. Summarised by group there is
+            # no key, because a group has no ledger to open.
+            self.table.load(rows, numeric=("Debit", "Credit"),
+                            keys=(None if self.by_group.isChecked()
+                                  else rows["Particulars"]))
 
         while self.footer_slot.count():
             item = self.footer_slot.takeAt(0)
@@ -3191,6 +3251,27 @@ class TrialBalanceScreen(QtWidgets.QWidget):
                 "difference in opening balances, not a problem with any "
                 "voucher. Every voucher is forced to balance when accepted.")
             tone(self.status, "warn")
+
+    def _open(self, index) -> None:
+        """Double-click an account to read its ledger.
+
+        Read from the ROW's own key, never its position: the table sorts on a
+        header click, so screen row 3 is not frame row 3 and this would open
+        whichever account happened to land on the line clicked.
+        """
+        key = self.table.key_at(index.row())
+        if key is None:
+            # Summarised by group: these rows are groups, and a group has no
+            # ledger. Said out loud rather than doing nothing, because a
+            # double-click that silently does nothing reads as broken.
+            window = self.window()
+            if isinstance(window, QtWidgets.QMainWindow):
+                window.statusBar().showMessage(
+                    "These lines are groups, not accounts — untick "
+                    "\"Summarise by group\" to open an account's ledger.",
+                    6000)
+            return
+        self.open_ledger.emit(str(key))
 
 
 class ProfitLossScreen(QtWidgets.QWidget):
@@ -4483,8 +4564,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.voucher.altered.connect(self._back_from_alter)
         self.voucher.masters_changed.connect(self._masters_changed)
         self.masters.changed.connect(self.refresh_all)
+        # Abandoning an alteration goes back where saving it goes (user asked
+        # 2026-10-21): you were reading a report, not starting a voucher.
+        self.voucher.cancelled.connect(self._back_from_alter)
         self.daybook.open_voucher.connect(self._alter)
         self.ledger.open_voucher.connect(self._alter)
+        self.trial.open_ledger.connect(self._show_ledger)
         self.outstanding.open_voucher.connect(self._alter)
         self.gst.open_voucher.connect(self._alter)
         # The company name is in the title bar and its currency symbol is in
@@ -5036,10 +5121,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_screen(0)
 
     def _back_from_alter(self) -> None:
-        """Go back to the report the altered voucher was opened from."""
+        """Go back to the report the altered voucher was opened from.
+
+        Reached by SAVING the alteration and by abandoning it - both are
+        finishing with the voucher you went in to look at. Reset to None
+        either way, so a later copy started from a blank form does not
+        navigate anywhere.
+        """
         index, self._altered_from = self._altered_from, None
         if index is not None and index != 0:
             self.show_screen(index)
+
+    def _show_ledger(self, name: str) -> None:
+        """Open the Ledger on an account double-clicked on the Trial Balance.
+
+        THE PERIOD COMES ACROSS WITH IT. The figure clicked is a balance as at
+        the trial balance's date, so a ledger drawn to any other date closes
+        on a different number - and agreeing with the figure you just pointed
+        at is the whole purpose of the drill-down. The financial year that
+        date falls in supplies the start, since a year of movement is the
+        context wanted behind a closing balance.
+        """
+        self.ledger.reload_ledgers()
+        if self.ledger.ledger_box.findText(name) < 0:
+            self.statusBar().showMessage(
+                f"These books have no account called {name}.", 6000)
+            return
+        self.ledger.ledger_box.setCurrentText(name)
+        _, as_at = self.trial.period.range()
+        self.ledger.period.show_period(acc.fy_bounds(as_at)[0], as_at)
+        # Found by identity rather than written as 2: the screen order is not
+        # the same in every build of this app, and a wrong number here would
+        # quietly show a different report.
+        self.show_screen(next(i for i, (_, widget) in enumerate(self.screens)
+                              if widget is self.ledger))
+        self.statusBar().showMessage(f"Ledger: {name}", 4000)
 
     def show_screen(self, index: int) -> None:
         self.stack.setCurrentIndex(index)

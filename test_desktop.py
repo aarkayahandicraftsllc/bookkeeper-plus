@@ -2070,6 +2070,129 @@ check("and is posted at the figure that was pasted",
 v.reset()
 settle()
 
+print("\n23j) Double-click an account on the Trial Balance to read its ledger")
+# Asked 2026-10-21: "if i double click on any account in trial balance it
+# should take me to ledger of that account".
+db.use_company(TMP)
+tb = window.trial
+window.show_screen(3)
+tb.by_group.setChecked(False)
+tb.refresh()
+settle()
+first = str(tb.table.key_at(0))
+check("each account line carries its own name as its key", bool(first), True)
+tb.table.doubleClicked.emit(tb.table.model().index(0, 0))
+settle()
+check("it moves to the Ledger", window.stack.currentIndex(), 2)
+check("on the account that was clicked",
+      window.ledger.ledger_box.currentText(), first)
+
+# THE POINT OF THE DRILL-DOWN: the ledger has to close on the figure that was
+# clicked, which means carrying the trial balance's date across. Drawn to any
+# other date it answers a different question.
+_, tb_as_at = tb.period.range()
+check("the ledger is drawn to the trial balance's date",
+      window.ledger.period.range()[1], tb_as_at)
+tb_rows = acc.trial_balance(tb_as_at)["rows"].set_index("Particulars")
+figure = round(float(tb_rows.loc[first, "Debit"])
+               - float(tb_rows.loc[first, "Credit"]), 2)
+statement = acc.ledger_statement(db.ledger_id(first),
+                                 *window.ledger.period.range())
+check("and closes on the figure that was pointed at",
+      statement["closing"], figure)
+
+# A row stopped being its position when the headers became sortable, so the
+# account opened must come from the row, not from the frame index.
+window.show_screen(3)
+tb.refresh()
+settle()
+frame_first = str(tb.table.key_at(0))
+# Twice: sort_by TOGGLES, so the second call is descending - which is what
+# puts a DIFFERENT account on line 0 and makes this test able to fail. The
+# rows arrive ordered by name, so ascending alone leaves row 0 where it was
+# and a positional bug would sail through.
+tb.table.sort_by(0)
+tb.table.sort_by(0)
+settle()
+top = str(tb.table.key_at(0))
+check("sorting put a different account on the top line", top != frame_first,
+      True)
+tb.table.doubleClicked.emit(tb.table.model().index(0, 0))
+settle()
+check("after a sort it opens the account on that line, not frame row 0",
+      window.ledger.ledger_box.currentText(), top)
+
+# Summarised by group there is nothing to open - a group has no ledger - so
+# it says so rather than doing nothing, which reads as broken.
+window.show_screen(3)
+tb.by_group.setChecked(True)
+settle()
+tb.table.doubleClicked.emit(tb.table.model().index(0, 0))
+settle()
+check("a group row opens nothing", window.stack.currentIndex(), 3)
+check("and says why", "groups, not accounts" in window.statusBar().currentMessage(),
+      True)
+tb.by_group.setChecked(False)
+settle()
+
+print("\n23k) Abandoning an alteration goes back to the report")
+# Asked 2026-10-21: "while i am in ledger an double click on an entry to view
+# and click on cancel edit it land on voucher entry page instead it should
+# land back on ledger page". Saving an alteration already went back; giving
+# up on one did not, which left you on an empty entry form.
+_real_question = QtWidgets.QMessageBox.question
+QtWidgets.QMessageBox.question = staticmethod(
+    lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes)
+
+window.show_screen(2)
+window.ledger.ledger_box.setCurrentText("Bank")
+window.ledger.period.year_box.setCurrentText(desktop.PeriodBar.SINCE)
+settle()
+check("the ledger has entries to open", window.ledger._frame.empty, False)
+window.ledger.table.doubleClicked.emit(
+    window.ledger.table.model().index(0, 0))
+settle()
+check("double-clicking an entry opens it for alteration",
+      window.voucher.editing_id is not None, True)
+check("on the voucher screen", window.stack.currentIndex(), 0)
+window.voucher.cancel_edit()
+settle()
+check("Cancel edit lands back on the Ledger", window.stack.currentIndex(), 2)
+check("with the form cleared", window.voucher.editing_id, None)
+
+# From the Day Book it goes back to the Day Book, and `reset()` on its own
+# must NOT navigate - it runs after every accept, on a company switch and
+# from the constructor, so putting the going-back there would move the screen
+# in all of those.
+window.show_screen(1)
+window.daybook.refresh()
+settle()
+window._alter(int(window.daybook.table.key_at(0)))
+settle()
+window.voucher.reset()
+settle()
+check("reset() alone stays put", window.stack.currentIndex(), 0)
+window.voucher.cancel_edit()
+settle()
+check("the button lands back on the Day Book", window.stack.currentIndex(), 1)
+
+# A copy begun on a blank form came from nowhere, so discarding it has
+# nowhere to go back to and must stay where it is.
+window.show_screen(0)
+window.voucher.reset()
+window.voucher.type_box.setCurrentText("Journal")
+settle()
+window.voucher.copy_voucher()
+settle()
+check("discarding a copy begun here stays on voucher entry",
+      window.stack.currentIndex(), 0)
+window.voucher.cancel_edit()
+settle()
+check("still there", window.stack.currentIndex(), 0)
+QtWidgets.QMessageBox.question = _real_question
+window.voucher.reset()
+settle()
+
 print("\n24) The shortcuts actually fire, pressed for real")
 # Binding a key is not the same as the key working, which is the whole lesson
 # of the Alt+C bug - so press it for real and see whether the action runs.

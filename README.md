@@ -438,12 +438,39 @@ Balances are held **debit-positive** internally: `+500` is 500 Dr, `-500` is
 | --- | --- |
 | **Voucher Entry** | Type, date, auto number, narration, then a Dr/Cr grid with ledger autocomplete and running totals. Accept is disabled until the two sides agree. **Copy** repeats a voucher without retyping it (bills excluded, GST carried). |
 | **Day Book** | Every voucher in the period, newest first, with **Debit account** and **Credit account** as separate columns. Double-click to alter one. |
-| **Ledger** | One account: opening balance, every entry with **To**/**By** particulars naming the other side, a running balance, closing. |
-| **Trial Balance** | Closing balances as Dr and Cr, by ledger or summarised by group, with or without **accounts standing at nil**. The total is a bar under the table, so the table itself can be sorted. |
+| **Ledger** | One account: opening balance, every entry with **To**/**By** particulars naming the other side, a running balance, closing. Double-click an entry to alter that voucher. |
+| **Trial Balance** | Closing balances as Dr and Cr, by ledger or summarised by group, with or without **accounts standing at nil**. The total is a bar under the table, so the table itself can be sorted. **Double-click an account to read its ledger.** |
 | **Profit & Loss** | Trading account → gross profit, then the indirect accounts → net profit. |
 | **Balance Sheet** | Liabilities and assets side by side, with net profit carried to Profit & Loss A/c. Summary, or **the accounts under each heading**. |
 | **Masters** | Create and alter ledgers and sub-groups. |
 | **Company** | Who the books belong to: name, address, PAN, GSTIN, TAN, CIN, financial year, currency. |
+
+### Getting from one report to another
+
+Double-click is "show me what is behind this line", and it goes the same way
+on every report that has something behind it:
+
+* **Day Book**, **Ledger**, **Outstanding** or the **GST** register → the
+  voucher, opened for alteration.
+* **Trial Balance** → that account's **Ledger**.
+
+Two details that are easy to get wrong and are worth knowing:
+
+* **The period travels with you.** The figure you clicked on the trial balance
+  is a balance *as at* its date, so the ledger opens drawn **to that same
+  date** — it closes on the number you just pointed at, which is the only
+  reason to drill into it. The start comes from the financial year that date
+  falls in, because a year of movement is the context you want behind a
+  closing balance.
+* **Finishing with a voucher puts you back where you came from** — whether you
+  *accept* the alteration or *abandon* it. Giving up on an alteration used to
+  leave you on an empty entry form, with the report you were reading to find
+  again by hand. A *new* voucher deliberately stays put: there you are entering
+  a run of them.
+
+Summarised by group, the trial balance's lines are groups rather than accounts,
+and a group has no ledger — double-clicking one says so instead of doing
+nothing.
 
 ## Choosing the period
 
