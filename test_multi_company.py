@@ -10,6 +10,10 @@ BOOKS_DIR pointed at a scratch folder, which is the real launch path.
 Both front ends are driven: the Qt picker and create dialog, and the Streamlit
 sidebar selector, including that switching really does change which books are
 being read rather than only the label at the top.
+
+The Streamlit section SKIPS, loudly and in the summary, where Streamlit is not
+installed - a desktop-only machine is a legitimate install, and the launch
+path this suite covers is needed there just the same.
 """
 
 import os
@@ -36,6 +40,7 @@ import db  # noqa: E402
 import desktop  # noqa: E402
 
 FAILURES = []
+SKIPPED = []
 
 
 def check(label, got, want):
@@ -195,41 +200,59 @@ check("the backup is not offered", any("backup" in f for f in listed), False)
 check("the three real companies still are", len(listed), 3)
 
 print("\n8) The Streamlit sidebar switches books too")
-from streamlit.testing.v1 import AppTest  # noqa: E402
+try:
+    from streamlit.testing.v1 import AppTest  # noqa: E402
+except ImportError:
+    # A DESKTOP-ONLY INSTALL IS A LEGITIMATE INSTALL. `pip install -r
+    # requirements-desktop.txt` does not bring Streamlit with it, and the
+    # rest of this suite is the UNPINNED LAUNCH PATH - the only coverage of
+    # how the app really starts - which is needed on such a machine just the
+    # same. So the browser section stands aside rather than taking the suite
+    # down with it.
+    #
+    # It says so loudly AND in the closing banner, which stops saying "ALL"
+    # when anything was skipped. A test that skips in silence is worse than
+    # one that does not exist, because the run still reads as clean.
+    SKIPPED.append("8) the Streamlit selector - streamlit is not installed")
+    print("  SKIP  streamlit is not installed, so there is no browser "
+          "version here to drive")
+else:
+    APP = Path(__file__).with_name("app.py")
+    at = AppTest.from_file(str(APP), default_timeout=180).run()
+    assert not at.exception, at.exception
+    selector = next((s for s in at.selectbox if s.key == "company_file"), None)
+    check("a company selector is rendered", selector is not None, True)
+    check("it offers every company", len(list(selector.options)), 3)
 
-APP = Path(__file__).with_name("app.py")
-at = AppTest.from_file(str(APP), default_timeout=180).run()
-assert not at.exception, at.exception
-selector = next((s for s in at.selectbox if s.key == "company_file"), None)
-check("a company selector is rendered", selector is not None, True)
-check("it offers every company", len(list(selector.options)), 3)
+    def shown(app_test):
+        """Everything the page prints, to see WHICH company is on screen."""
+        parts = [m.value for m in app_test.markdown
+                 if isinstance(m.value, str)]
+        parts += [t.value for t in app_test.title if isinstance(t.value, str)]
+        parts += [h.value for h in app_test.header if isinstance(h.value, str)]
+        return " ".join(parts)
 
+    at = selector.set_value(made["Alpha Exports"].name).run()
+    assert not at.exception, at.exception
+    page = shown(at)
+    check("picking Alpha shows Alpha", "Alpha Exports" in page, True)
+    check("and not Beta", "Beta Trading" in page, False)
 
-def shown(app_test):
-    """Everything the page prints, to see WHICH company is on screen."""
-    parts = [m.value for m in app_test.markdown if isinstance(m.value, str)]
-    parts += [t.value for t in app_test.title if isinstance(t.value, str)]
-    parts += [h.value for h in app_test.header if isinstance(h.value, str)]
-    return " ".join(parts)
-
-
-at = selector.set_value(made["Alpha Exports"].name).run()
-assert not at.exception, at.exception
-page = shown(at)
-check("picking Alpha shows Alpha", "Alpha Exports" in page, True)
-check("and not Beta", "Beta Trading" in page, False)
-
-selector = next(s for s in at.selectbox if s.key == "company_file")
-at = selector.set_value(made["Beta Trading"].name).run()
-assert not at.exception, at.exception
-page = shown(at)
-check("picking Beta shows Beta", "Beta Trading" in page, True)
-check("and not Alpha", "Alpha Exports" in page, False)
+    selector = next(s for s in at.selectbox if s.key == "company_file")
+    at = selector.set_value(made["Beta Trading"].name).run()
+    assert not at.exception, at.exception
+    page = shown(at)
+    check("picking Beta shows Beta", "Beta Trading" in page, True)
+    check("and not Alpha", "Alpha Exports" in page, False)
 
 print("\n9) Nothing escaped the sandbox")
 check("every company file is in the scratch folder",
       all(str(p).startswith(str(SANDBOX)) for p in db.company_files()), True)
 
-print("\n" + ("ALL MULTI-COMPANY CHECKS PASSED" if not FAILURES
-             else f"FAILURES: {FAILURES}"))
+if SKIPPED:
+    print("\nSKIPPED: " + "; ".join(SKIPPED))
+# "ALL" is a claim, so it is only made when nothing stood aside.
+passed = ("ALL MULTI-COMPANY CHECKS PASSED" if not SKIPPED
+          else "MULTI-COMPANY CHECKS PASSED, WITH SKIPS")
+print("\n" + (passed if not FAILURES else f"FAILURES: {FAILURES}"))
 raise SystemExit(1 if FAILURES else 0)
