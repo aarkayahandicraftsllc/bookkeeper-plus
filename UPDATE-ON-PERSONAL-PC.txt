@@ -1,0 +1,417 @@
+===============================================================================
+BOOKKEEPER PLUS - GETTING IT ONTO YOUR PERSONAL COMPUTERS
+===============================================================================
+Written 2026-10-21. Windows and macOS (Apple Silicon).
+Source project on the work machine:
+  C:\Users\223137552.AEROAD\claude-projects\BookkeeperPlus\
+
+WHERE THE BOOKS LIVE IS NOT THE SAME ON THE TWO PLATFORMS. Read the section
+"THE ONE WARNING THAT MATTERS MOST" before installing on either.
+
+  Windows   the data\ folder BESIDE BookkeeperPlus.exe
+  macOS     ~/Library/Application Support/BookkeeperPlus/data
+
+THE MAC BUILD HAS NEVER BEEN RUN BY A HUMAN. GitHub proves it compiles and
+that the checks pass headlessly; it cannot prove the app feels right. Expect
+rough edges, and the voucher-type shortcuts in particular: Alt+Shift+P and
+friends become Option+Shift+P on a Mac, where that combination sometimes types
+a special character instead of firing. Ctrl+A, Ctrl+P and the rest become
+Cmd+A, Cmd+P, which Qt does automatically. Report anything odd and it can be
+fixed properly.
+
+This is the DESKTOP app only. The browser (Streamlit) version is not being
+set up on the personal computer: Streamlit is never installed, nothing listens
+on a port, and nothing of it runs. Its source travels with the repo because it
+is part of the project, and sits there inert.
+
+Bookkeeper (the accounting-only original) is a separate project with
+its own repo, its own releases and its own books. Do not mix them.
+
+
+THE SITUATION
+-------------
+The work computer blocks copying an executable off it. That is fine - you do
+not need to move one. The whole program is 10 plain-text source files of about
+1 MB, and a Windows .exe AND a Mac .app can both be built from that text in
+the cloud, for free, by the machine that hosts the source.
+
+TWO THINGS HAVE TO TRAVEL, AND THEY GO SEPARATELY:
+
+  1. THE PROGRAM - source only, via GitHub (Route A) or a ZIP (Route B).
+  2. THE BOOKS   - data\, 1.5 MB of .db files. This is NOT in the repo and
+                   never will be: it is your financial records. See
+                   "MOVING THE BOOKS" below. Do this part too, or the app
+                   opens at the personal computer with empty books.
+
+This differs from Net Worth Tracker, where the personal computer already had
+its own database. BookkeeperPlus has never run there, so the books must come with
+it the first time.
+
+
+===============================================================================
+ROUTE A - LET GITHUB BUILD THE EXE (RECOMMENDED)
+===============================================================================
+Steps A1-A4 on the WORK computer, A5 on the PERSONAL computer.
+
+A1. Create a private repository
+    - github.com -> + (top right) -> New repository.
+    - Owner: aarkayahandicraftsllc    (where your other projects live)
+    - Name: bookkeeper-plus
+    - Visibility: PRIVATE  (important - this is your accounting software and
+      its history)
+    - Do NOT tick "Add a README" or add a .gitignore.
+    - Create repository.
+
+A2. Push the source from the work computer
+
+      cd "C:\Users\223137552.AEROAD\claude-projects\BookkeeperPlus"
+      git remote add origin https://github.com/aarkayahandicraftsllc/bookkeeper-plus.git
+      git push -u origin main
+
+    Git Credential Manager is already set up on this machine and four other
+    projects push to this same organisation, so this should go straight
+    through. If it asks for a password, use a Personal Access Token:
+    github.com -> avatar -> Settings -> Developer settings -> Personal access
+    tokens -> Tokens (classic) -> Generate new token, tick "repo".
+
+    NOTE: only text is pushed. data\, previous\, build\ and BookkeeperPlus.exe are
+    all excluded by .gitignore, so neither an executable nor a single figure
+    from your books ever leaves this machine through git.
+
+A3. The build recipe is already in the project
+    .github\workflows\release.yml is committed, so there is nothing to write.
+    It tells GitHub to install Python, run the three test suites, and build -
+    TWICE, once on a Windows machine and once on an Apple Silicon Mac, because
+    PyInstaller cannot build for one platform from the other. Both results are
+    attached to the same release.
+
+    Confirm it arrived: on github.com open the "Actions" tab. You should see a
+    workflow called "Build Bookkeeper Plus" with two jobs under it.
+
+A4. Cut a release
+
+      git tag v1.0.0
+      git push origin v1.0.0
+
+    Watch it on the Actions tab (about 5-8 minutes for Windows, a little more
+    for the Mac). When both jobs finish, the downloads are in two places:
+      - Releases tab -> v1.0.0 -> Assets, holding BOTH
+            BookkeeperPlus-v1.0.0-Windows-x64.exe
+            BookkeeperPlus-v1.0.0-macOS-arm64.dmg
+      - Actions -> that run -> Artifacts
+
+    Expected in the log, and not a problem: the launch-path suite ends
+    "MULTI-COMPANY CHECKS PASSED, WITH SKIPS". Its last section drives the
+    browser version, which is deliberately not installed.
+
+    If the MAC job fails on a window-width or geometry check, that is a test
+    calibrated to Windows font metrics meeting a Mac's default font - not a
+    fault in the accounting. It needs fixing properly in the test, then
+    re-tagging. The Windows job is unaffected and its .exe still builds.
+
+A5a. On the WINDOWS personal computer
+    - Open https://github.com/aarkayahandicraftsllc/bookkeeper-plus/releases
+    - Sign in (private repo) and download the -Windows-x64.exe.
+    - Make a folder for it, e.g. C:\BookkeeperPlus\, and put the exe there.
+    - Rename it to BookkeeperPlus.exe (optional, but keeps future updates tidy).
+    - Put the books beside it - see "MOVING THE BOOKS".
+    - Double-click it. SmartScreen -> "More info" -> "Run anyway".
+
+A5b. On the MACBOOK
+    - Same Releases page; download the -macOS-arm64.dmg.
+    - Open the .dmg and drag BookkeeperPlus.app into Applications.
+    - FIRST LAUNCH: macOS will refuse, saying "Apple could not verify
+      BookkeeperPlus is free of malware...". That is expected on every new
+      version - the app is not notarised, which needs a paid Apple Developer
+      account. Two ways through:
+
+        EITHER  System Settings -> Privacy & Security -> scroll to Security.
+                After a blocked attempt there is a line about BookkeeperPlus with
+                an "Open Anyway" button. Click it, authenticate, confirm.
+
+        OR      in Terminal:
+                  xattr -dr com.apple.quarantine /Applications/BookkeeperPlus.app
+                then open it normally. The -r matters: an app bundle is a
+                folder, and the quarantine flag sits on more than the top of
+                it.
+
+      NOTE: on macOS 15 (Sequoia) and later, right-click -> Open NO LONGER
+      WORKS. Apple removed that bypass. Use one of the two above.
+    - Put the books in ~/Library/Application Support/BookkeeperPlus/data -
+      see "MOVING THE BOOKS". NOT inside the app.
+    - Eject the .dmg afterwards.
+
+FOR EVERY FUTURE UPDATE:
+    on work PC:   git push && git tag v1.0.1 && git push origin v1.0.1
+    on Windows:   download, and REPLACE the exe that is already sitting
+                  beside data\ (see the warning below)
+    on the Mac:   download, drag the new app into Applications over the old
+                  one, and right-click -> Open the first time. Your books are
+                  not in the app, so they are untouched.
+
+
+===============================================================================
+ROUTE B - CARRY THE SOURCE AND BUILD IT THERE
+===============================================================================
+Use this if github.com is unreachable from the work computer. It is much
+lighter than the Net Worth Tracker equivalent: Python only, no Rust, no Visual
+Studio Build Tools.
+
+B1. On the WORK computer, make a source-only ZIP (about 1 MB, text only):
+
+      cd "C:\Users\223137552.AEROAD\claude-projects\BookkeeperPlus"
+      git archive --format=zip -o "%USERPROFILE%\Downloads\bookkeeper-plus-src.zip" HEAD
+
+    That contains only tracked source - no executable, no books, no build
+    output.
+
+B2. On the PERSONAL computer, install Python ONCE
+    Python 3.12 or newer from python.org. In the installer, tick
+    "Add python.exe to PATH". Close and reopen the terminal afterwards.
+
+B3. Unzip it, then:
+
+      cd <wherever you unzipped it>
+      pip install -r requirements-desktop.txt pyinstaller
+      python test_books.py
+      python build_exe.py
+
+    Do NOT install requirements.txt - that is the browser version's Streamlit.
+
+    ON WINDOWS build_exe.py writes BookkeeperPlus.exe into that same folder,
+    deliberately beside data\, so the exe and "python desktop.py" read the
+    same books.
+
+    ON MACOS the same command builds dist/BookkeeperPlus.app and wraps it in
+    dist/BookkeeperPlus.dmg instead (it uses hdiutil, which every Mac has). It
+    does NOT put anything beside the source, because on a Mac the books are
+    in ~/Library/Application Support/BookkeeperPlus and there is nothing here for
+    the app to sit next to. Python 3.12+ from python.org works; so does the
+    Homebrew one.
+
+B4. Put the books in place - see below - and double-click the exe. Or run it
+    straight from source, which needs no build at all:
+
+      python desktop.py
+
+B5. For future updates, repeat B1 and B3.
+
+
+===============================================================================
+MOVING THE BOOKS  (required, whichever route)
+===============================================================================
+The books are SQLite files in the project's data\ folder. They are gitignored
+on purpose: committing them would write your financial records permanently
+into a repository's history.
+
+On the WORK computer they are staged ready to carry at:
+
+      C:\Users\223137552.AEROAD\claude-projects\transfer-to-home\BookkeeperPlus-data\
+
+Carry that folder by a route you are comfortable with - an encrypted USB stick
+(BitLocker To Go), or a password-protected archive.
+
+ON WINDOWS, put it next to the executable and name it exactly data:
+
+      C:\BookkeeperPlus\BookkeeperPlus.exe
+      C:\BookkeeperPlus\data\books.db
+      C:\BookkeeperPlus\data\amit.db
+      C:\BookkeeperPlus\data\...
+
+ON THE MAC it goes somewhere else entirely - NOT inside the app:
+
+      ~/Library/Application Support/BookkeeperPlus/data/books.db
+      ~/Library/Application Support/BookkeeperPlus/data/amit.db
+      ~/Library/Application Support/BookkeeperPlus/data/...
+
+    That folder will not exist until you make it. In Finder press
+    Shift-Cmd-G and paste:  ~/Library/Application Support
+    then create a folder "BookkeeperPlus" inside it, and put the carried "data"
+    folder in there. (The Library folder is hidden by default, which is why
+    Shift-Cmd-G rather than browsing for it.)
+
+    Or in Terminal:
+      mkdir -p ~/Library/Application\ Support/BookkeeperPlus
+      cp -R /Volumes/<your-usb>/BookkeeperPlus-data ~/Library/Application\ Support/BookkeeperPlus/data
+
+IF YOU RUN BOTH MACHINES, they each have their OWN books from that moment on.
+Nothing synchronises them. Enter vouchers on one machine only, or you will
+have two divergent sets of books with no way to merge them.
+
+What should be in there, to check nothing was lost in transit. Open each with
+F3 (Switch company):
+
+      My Company       10 vouchers
+      Amit              3 vouchers
+
+On the Trial Balance and the Balance Sheet, "Difference in opening balances"
+should read the same as it does here. Both statements must balance.
+
+NOTE: THESE ARE NOT THE SAME BOOKS AS BOOKKEEPER'S. This fork was cloned on
+2026-10-19 with a copy of the books as they stood then, and nothing has been
+entered here since - the real day-to-day books (Amit-USA, 109 vouchers) live
+in the other app. If you intend Plus to become the working app, carry THAT
+app's data folder over instead of this one, and start entering in one place
+only. Two apps both holding "My Company" is the easiest way to end up with
+two half-sets of books.
+
+DO NOT put data\ in OneDrive, Dropbox or any synced folder. SQLite over
+file-sync corrupts, and a corrupt database does not announce itself - it fails
+on the day you need it.
+
+Once the books are safely on the personal computer, delete the
+transfer-to-home folder from the work computer. It is a second copy of your
+financial records sitting on a machine that is not yours.
+
+
+===============================================================================
+THE ONE WARNING THAT MATTERS MOST
+===============================================================================
+ON WINDOWS, THE BOOKS LIVE BESIDE THE EXECUTABLE, NOT IN %APPDATA%.
+
+This is different from Net Worth Tracker, where data lives in
+%APPDATA%\com.networth.tracker\ and the installer never touches it. BookkeeperPlus
+has no installer: the exe is the whole app, and it reads the data\ folder that
+sits next to wherever that exe is.
+
+So when a new version is downloaded, it must REPLACE the exe in the folder
+that already holds data\. An exe launched from Downloads, or from the desktop,
+or from any other folder, will create a fresh EMPTY data\ beside itself and
+open blank books - which looks exactly like every book you own has been lost.
+It has not been; the books are still in the old folder, and moving the exe
+back beside them restores everything.
+
+ON MACOS IT IS THE OPPOSITE, AND FOR A GOOD REASON.
+
+There the books live in ~/Library/Application Support/BookkeeperPlus/data,
+OUTSIDE the app, and the app never keeps anything inside itself. That is
+deliberate: on macOS you install by dragging the new BookkeeperPlus.app over the
+old one, which REPLACES it wholesale. Books kept inside the bundle would be
+destroyed on every single update. (And an unsigned app downloaded from the
+internet is run by macOS from a randomised read-only location the first time,
+so writing inside the bundle may not even work.)
+
+The practical upshot:
+  Windows - the exe must go back next to your books.
+  macOS   - the app can be replaced freely; never put books inside it.
+
+(On either platform, setting the BOOKS_DIR environment variable to the folder
+holding the books overrides all of this, and the app will read them from there
+wherever it lives.)
+
+
+===============================================================================
+BACKUPS, ONCE IT IS OVER THERE
+===============================================================================
+The app offers to back up when you CLOSE it, and writes into data\backups\,
+keeping 20 per company. Ctrl+B backs up on demand (Company menu -> Back up
+now).
+
+That is the same disk, so it is not disaster cover. Once these books are the
+only copy, put data\ onto an external drive or a private cloud folder
+periodically. Copy it when the app is CLOSED - that is when the files are
+guaranteed consistent.
+
+A close-time backup needs a clean exit: a crash, a Task Manager kill or a
+power cut leaves that session without one. That is why Ctrl+B still matters.
+
+
+===============================================================================
+TROUBLESHOOTING
+===============================================================================
+"Windows protected your PC" / SmartScreen blue box
+    "More info" -> "Run anyway". Expected on every new version - the app has
+    no code-signing certificate.
+
+MAC: "Apple could not verify BookkeeperPlus is free of malware", or "cannot be
+opened because the developer cannot be verified", with only Cancel / Move to
+Bin / Done
+    Expected, once per downloaded version. The app is not notarised.
+    System Settings -> Privacy & Security -> Security section -> "Open
+    Anyway" (it appears only after a blocked attempt). Or:
+        xattr -dr com.apple.quarantine /Applications/BookkeeperPlus.app
+    RIGHT-CLICK -> OPEN DOES NOT WORK on macOS 15 (Sequoia) or later; Apple
+    removed it. Older macOS still accepts it.
+
+MAC: "BookkeeperPlus is damaged and cannot be opened"
+    Same cause - the quarantine flag on an unsigned app - despite the
+    wording. Nothing is damaged. Use the xattr command above.
+
+MAC: tired of clearing it on every update?
+    The flag comes from DOWNLOADING. An app you build on the Mac itself is
+    never quarantined, so Route B (install Python, run build_exe.py there)
+    skips all of this permanently. The alternative is a paid Apple Developer
+    account to notarise the builds.
+
+MAC: the app bounces once in the Dock and quits
+    Run it from Terminal to see the error it is hiding:
+        /Applications/BookkeeperPlus.app/Contents/MacOS/Bookkeeper
+    Send me whatever it prints.
+
+The app opens but the books are empty
+    WINDOWS: you are looking at a data\ folder the exe made for itself
+    because it could not find yours. Close it, move the exe into the folder
+    that holds your data\, and start it again.
+    MAC: the books are not where the app looks. They must be at
+    ~/Library/Application Support/BookkeeperPlus/data - check the spelling of
+    "data" and that the .db files are directly inside it, not in a nested
+    folder such as data/BookkeeperPlus-data/.
+    See "THE ONE WARNING THAT MATTERS MOST".
+
+A company is missing from the F3 dropdown
+    The folder IS the registry: every .db directly inside data\ is a company.
+    Check the file is in data\ itself, not in data\backups\, and that its name
+    does not contain "backup", "tmp" or "old" - those are skipped on purpose
+    so backups do not list as companies.
+
+Route A: the Actions run fails
+    Open the failing step on the Actions tab. If it is one of the three test
+    steps, the build was refused on purpose - the suites run first precisely
+    so a release cannot carry a broken build.
+
+Route A: "MULTI-COMPANY CHECKS PASSED, WITH SKIPS"
+    Not a failure. The skipped section drives the browser version, which is
+    not installed on CI by design.
+
+Route B: "ModuleNotFoundError: No module named 'PySide6'"
+    pip install -r requirements-desktop.txt was not run, or was run against a
+    different Python. Check with: python -c "import PySide6; print('ok')"
+
+Route B: the suites fail on "import accounting"
+    You ran python -I. Isolated mode drops the project folder from the import
+    path. Use plain "python".
+
+
+===============================================================================
+QUICK REFERENCE
+===============================================================================
+Build the exe (either machine)
+    python build_exe.py
+
+Run without building
+    python desktop.py
+
+Run the checks (desktop-only machine: these three, not test_ui.py)
+    python test_books.py
+    set QT_QPA_PLATFORM=offscreen
+    python test_desktop.py
+    python test_multi_company.py
+
+Make a source-only ZIP
+    git archive --format=zip -o "%USERPROFILE%\Downloads\bookkeeper-plus-src.zip" HEAD
+
+Cut a release that builds BOTH downloads in the cloud
+    git tag v1.0.1 && git push origin v1.0.1
+
+The books (back these up)
+    Windows   the data\ folder beside the executable
+    macOS     ~/Library/Application Support/BookkeeperPlus/data
+
+Install the first time
+    Windows   put the .exe in the folder holding data\, double-click
+    macOS     drag the app from the .dmg to Applications, then
+              RIGHT-CLICK -> Open (not double-click)
+
+Switch company          F3
+Back up now             Ctrl+B
+===============================================================================

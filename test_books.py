@@ -549,18 +549,54 @@ print("\nWhere the data folder lives when packaged")
 # when it closed. A company created in the exe, with journals entered, was
 # gone on the next launch. Invisible from source, where __file__ is correct,
 # so it needs a test that pretends to be frozen.
+#
+# BOTH BRANCHES FAKE sys.platform, INCLUDING THE WINDOWS ONE. This suite runs
+# on a macOS runner in CI as well as here, and `_app_dir` branches on the
+# platform - so a check that leaves the real one in place is asserting
+# whichever branch the host happens to take. That is how this very check
+# failed its first CI run: written on Windows, it passed here and then
+# claimed on the Mac that the anchor should be the executable's folder, which
+# on macOS is exactly what it must NOT be.
 _real_frozen = getattr(sys, "frozen", None)
 _real_executable = sys.executable
+_real_platform = sys.platform
 try:
     sys.frozen = True
+
+    sys.platform = "win32"
     sys.executable = str(Path(tempfile.gettempdir()) / "somewhere"
                          / "BookkeeperPlus.exe")
     frozen_dir = db._app_dir()
-    check("packaged, the anchor is the executable's folder",
+    check("packaged on Windows, the anchor is the executable's folder",
           frozen_dir, Path(sys.executable).resolve().parent)
     check("and NOT the unpacked module directory",
           frozen_dir == Path(db.__file__).resolve().parent, False)
+
+    # macOS packages the app as Bookkeeper.app/Contents/MacOS/Bookkeeper, so
+    # the executable's folder is INSIDE the bundle. Books kept there would be
+    # destroyed every time the app is replaced - on macOS you install by
+    # dragging the new bundle over the old - and an unsigned downloaded app is
+    # run from a randomised read-only path by Gatekeeper, where the write
+    # fails or goes somewhere temporary. Same family as the bug above.
+    sys.platform = "darwin"
+    sys.executable = "/Applications/BookkeeperPlus.app/Contents/MacOS/BookkeeperPlus"
+    mac_dir = db._app_dir()
+    check("packaged on macOS, the anchor is Application Support",
+          mac_dir,
+          Path.home() / "Library" / "Application Support" / "BookkeeperPlus")
+    check("so the books are NOT inside the .app bundle",
+          ".app" in str(mac_dir), False)
+    check("and the two platforms really do differ",
+          frozen_dir == mac_dir, False)
+    # THE FOLDER MUST BE NAMED FOR THIS APP. On Windows the two apps are kept
+    # apart by sitting beside their own executables; under Application Support
+    # nothing separates them but this name, so Bookkeeper's version of
+    # `db.py` copied over wholesale - which is how fixes travel between these
+    # two projects - would silently have Plus opening the other app's books.
+    check("and the folder is THIS app's, not Bookkeeper's",
+          mac_dir.name, "BookkeeperPlus")
 finally:
+    sys.platform = _real_platform
     sys.executable = _real_executable
     if _real_frozen is None:
         del sys.frozen

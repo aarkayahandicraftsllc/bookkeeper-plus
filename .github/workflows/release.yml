@@ -1,0 +1,208 @@
+# Builds Bookkeeper Plus for Windows and macOS on GitHub's machines.
+#
+# This is the FORK - bill-wise receivables/payables and GST - and it keeps its
+# own books, its own repo and its own releases. Do not cross the two.
+#
+# Why this exists: the work computer blocks copying an executable off it, so
+# the binaries cannot be hand-carried to the personal machines. Pushing a tag
+# here produces both downloads attached to a GitHub Release instead -- only
+# source ever leaves the work machine, and neither personal machine needs
+# Python or PyInstaller. Same arrangement as the networth-tracker project.
+# See UPDATE-ON-PERSONAL-PC.txt.
+#
+#   Cut a release:   git tag v1.0.0 && git push origin v1.0.0
+#   Or build without releasing: Actions tab -> this workflow -> Run workflow
+#
+# There is no tag-vs-version check, unlike networth-tracker: this app carries
+# no version string of its own, so a tag is only a label for the release page
+# and there is nothing it could contradict.
+#
+# PyInstaller cannot cross-compile, so each platform is built on its own
+# runner, and the macOS one is arm64 (Apple Silicon) because that is the
+# machine it is for. An Intel Mac would need a second job on macos-13.
+#
+# DESKTOP ONLY. requirements-desktop.txt is installed and requirements.txt
+# (Streamlit) is not, so test_multi_company.py skips its browser section and
+# reports "PASSED, WITH SKIPS" -- the expected result here. test_ui.py is not
+# run at all, since it exists only to drive that front end.
+
+name: Build Bookkeeper Plus
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows (.exe)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-desktop.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-desktop.txt pyinstaller
+
+      # The suites run BEFORE the build, so a release can never carry a build
+      # that fails its own checks. Qt runs headless; a runner has no display.
+      - name: Accounting and report checks
+        run: python test_books.py
+
+      - name: Desktop checks
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python test_desktop.py
+
+      # The unpinned launch path: how the app actually starts, which the other
+      # suites deliberately bypass by pinning BOOKS_DB.
+      - name: Launch-path checks
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python test_multi_company.py
+
+      - name: Build the executable
+        run: python build_exe.py
+
+      # Named for the release, because the build always produces a bare
+      # BookkeeperPlus.exe and several downloads would collide in one folder.
+      - name: Name it for this release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: cp BookkeeperPlus.exe "BookkeeperPlus-${GITHUB_REF_NAME}-Windows-x64.exe"
+
+      - name: Upload as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BookkeeperPlus-Windows
+          path: BookkeeperPlus.exe
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: BookkeeperPlus-${{ github.ref_name }}-Windows-x64.exe
+          body: |
+            Bookkeeper Plus desktop app, ${{ github.ref_name }}.
+
+            **Windows** — `BookkeeperPlus-${{ github.ref_name }}-Windows-x64.exe`
+            **macOS (Apple Silicon)** — `BookkeeperPlus-${{ github.ref_name }}-macOS-arm64.dmg`
+
+            ---
+
+            **Windows: put the exe in the folder that already holds `data\`,
+            replacing the old one.** The books live in a `data\` folder beside
+            the executable, so an exe run from anywhere else — Downloads, the
+            desktop — makes its own empty `data\` and opens blank books. That
+            looks exactly like data loss and is not; the books are still in
+            the old folder.
+
+            **macOS: drag `BookkeeperPlus.app` out of the .dmg into Applications**,
+            replacing the old one. Your books are NOT inside the app — they
+            live in `~/Library/Application Support/BookkeeperPlus/data`, so
+            replacing the app leaves them untouched. First launch: macOS will
+            refuse it ("Apple could not verify..."), because the app is not
+            notarised. Go to **System Settings -> Privacy & Security ->
+            Security -> Open Anyway**, which appears after a blocked attempt.
+            Or `xattr -dr com.apple.quarantine /Applications/BookkeeperPlus.app`.
+            Right-click -> Open does NOT work on macOS 15 or later.
+
+            Neither platform's update touches your books. Any new database
+            columns are added on first open.
+
+  macos:
+    name: macOS (.dmg, Apple Silicon)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-desktop.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-desktop.txt pyinstaller
+
+      # NOTE: the app has never run on macOS, and test_desktop.py asserts
+      # window widths MEASURED FROM FONT METRICS. If this job fails on a width
+      # or geometry check, that is a Windows-calibrated assertion meeting a
+      # different default font -- a test to make platform-aware, not
+      # necessarily a defect in the app. The arithmetic suite is the one that
+      # proves the books are right, and it is platform-independent.
+      - name: Accounting and report checks
+        run: python test_books.py
+
+      - name: Desktop checks
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python test_desktop.py
+
+      - name: Launch-path checks
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python test_multi_company.py
+
+      # Produces dist/BookkeeperPlus.app and wraps it in dist/BookkeeperPlus.dmg.
+      - name: Build the app bundle and disk image
+        run: python build_exe.py
+
+      - name: Name it for this release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cp dist/BookkeeperPlus.dmg "BookkeeperPlus-${GITHUB_REF_NAME}-macOS-arm64.dmg"
+
+      - name: Upload as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BookkeeperPlus-macOS
+          path: dist/BookkeeperPlus.dmg
+          if-no-files-found: error
+
+      # The SAME body as the Windows job, deliberately duplicated: the two
+      # jobs finish in whichever order they finish, and both attach to one
+      # release. Identical text means the notes read the same regardless of
+      # which one wrote them last. (Actions does not support YAML anchors.)
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: BookkeeperPlus-${{ github.ref_name }}-macOS-arm64.dmg
+          body: |
+            Bookkeeper Plus desktop app, ${{ github.ref_name }}.
+
+            **Windows** — `BookkeeperPlus-${{ github.ref_name }}-Windows-x64.exe`
+            **macOS (Apple Silicon)** — `BookkeeperPlus-${{ github.ref_name }}-macOS-arm64.dmg`
+
+            ---
+
+            **Windows: put the exe in the folder that already holds `data\`,
+            replacing the old one.** The books live in a `data\` folder beside
+            the executable, so an exe run from anywhere else — Downloads, the
+            desktop — makes its own empty `data\` and opens blank books. That
+            looks exactly like data loss and is not; the books are still in
+            the old folder.
+
+            **macOS: drag `BookkeeperPlus.app` out of the .dmg into Applications**,
+            replacing the old one. Your books are NOT inside the app — they
+            live in `~/Library/Application Support/BookkeeperPlus/data`, so
+            replacing the app leaves them untouched. First launch: macOS will
+            refuse it ("Apple could not verify..."), because the app is not
+            notarised. Go to **System Settings -> Privacy & Security ->
+            Security -> Open Anyway**, which appears after a blocked attempt.
+            Or `xattr -dr com.apple.quarantine /Applications/BookkeeperPlus.app`.
+            Right-click -> Open does NOT work on macOS 15 or later.
+
+            Neither platform's update touches your books. Any new database
+            columns are added on first open.

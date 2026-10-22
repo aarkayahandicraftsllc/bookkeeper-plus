@@ -836,14 +836,35 @@ pip install -r requirements-desktop.txt pyinstaller
 python build_exe.py
 ```
 
-Produces **`Bookkeeper.exe` in this folder, beside `data/`** — copy the two
-together anywhere and double-click, no Python needed on that machine.
+On **Windows**, that produces **`BookkeeperPlus.exe` in this folder, beside
+`data/`** — copy the two together anywhere and double-click, no Python needed
+on that machine.
 
-**The books live in a `data` folder next to the executable.** That is why the
-exe is built here rather than into `dist/`: here, the packaged app and
-`python desktop.py` read the *same* books. Built into `dist/` they had a set
-each, and vouchers entered through one were missing from the other. Set
+On **macOS** the same command produces **`dist/BookkeeperPlus.app`, wrapped in
+`dist/BookkeeperPlus.dmg`** (via `hdiutil`), and the books live in
+**`~/Library/Application Support/BookkeeperPlus/data`** instead.
+
+**The books live in a `data` folder next to the executable — on Windows.**
+That is why the exe is built here rather than into `dist/`: here, the packaged
+app and `python desktop.py` read the *same* books. Built into `dist/` they had
+a set each, and vouchers entered through one were missing from the other. Set
 `BOOKS_DIR` to override — a OneDrive or shared folder, say.
+
+> **macOS cannot work that way, and the difference is deliberate.** A Mac app
+> is a *bundle*, and you install one by dragging it over the old copy — so
+> books kept inside `BookkeeperPlus.app` would be destroyed on every update. Worse,
+> Gatekeeper runs an unsigned downloaded app from a randomised read-only path
+> (App Translocation), where writing inside the bundle may not work at all.
+> Both are the 2026-10-16 bug below wearing a different hat, so on macOS
+> `db._app_dir()` returns `~/Library/Application Support/BookkeeperPlus`, which
+> outlives the app. `test_books.py` fakes `sys.platform` to hold that.
+>
+> The consequence worth remembering: **a Windows update must put the exe back
+> beside the books; a Mac update must never put the books inside the app.**
+
+**Both platforms are built in CI** on a `v*` tag — see
+`.github/workflows/release.yml`, and `UPDATE-ON-PERSONAL-PC.txt` for getting
+either onto a personal machine.
 
 > **This was a real data-loss bug, fixed 2026-10-16.** The data folder was
 > anchored on `__file__`, and a PyInstaller *onefile* build unpacks itself into

@@ -46,8 +46,32 @@ def _app_dir() -> Path:
     The executable's own location is the stable anchor, which also keeps the
     promise the packaging script makes: the books sit in ``data`` next to the
     exe, so the two travel together.
+
+    **macOS is the exception, and it has to be.** A packaged Mac app is
+    ``BookkeeperPlus.app/Contents/MacOS/BookkeeperPlus``, so the executable's
+    folder is *inside the bundle* — and a bundle is a disposable thing.
+    Replacing the app with a newer one, which on macOS means dragging it over
+    the old, would take the books with it; and Gatekeeper runs an unsigned
+    downloaded app from a randomised read-only location (App Translocation),
+    where the write either fails or lands somewhere temporary. Both are the
+    2026-10-16 bug wearing a different hat. So on macOS the anchor is the
+    standard place for an application's own data.
+
+    **The folder is named for THIS app, not for Bookkeeper.** On Windows the
+    two are separated by sitting beside their own executables; under
+    ``Application Support`` nothing separates them but the name, and sharing
+    one folder would have Plus opening the other app's books. These are
+    deliberately separate books — see the README.
+
+    The consequence to keep in mind: **the books are beside the executable on
+    Windows and under the home folder on macOS**, so moving books between the
+    two platforms is not the same operation in both directions.
+    ``BOOKS_DIR`` still overrides either.
     """
     if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            return (Path.home() / "Library" / "Application Support"
+                    / "BookkeeperPlus")
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
