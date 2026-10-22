@@ -285,6 +285,18 @@ window.voucher.reset()
 check("cancelling clears the edit", window.voucher.editing_id, None)
 
 print("\n10) Creating a ledger through Masters")
+# THE PICK LIST FIRST, because every other check on this screen passes
+# without one: both group boxes are EDITABLE, so `setCurrentText` works
+# perfectly on an empty combo and a lost list is invisible to a test that
+# only ever types into it. That is exactly how the list went missing when
+# `report()` was added to this screen - the refill ended up after a
+# `return` - leaving the user nothing to choose from.
+check("the Under box offers every group to choose from",
+      [window.masters.led_group.itemText(i)
+       for i in range(window.masters.led_group.count())],
+      list(db.get_groups()["name"]))
+check("and a group's own parent box the same",
+      window.masters.grp_parent.count(), len(db.get_groups()))
 window.masters.led_name.setText("Petty Cash")
 window.masters.led_group.setCurrentText("Cash-in-hand")
 window.masters.led_open.setValue(2_500)
@@ -1354,10 +1366,43 @@ check("the printed page groups the thousands",
 
 # The input screens are not reports, and must say so rather than printing
 # something arbitrary.
-# Voucher Entry, Masters and Company hold INPUT, so there is nothing to
-# print. Outstanding and GST moved in at 6 and 7 and ARE reports, so the
-# input screens are now 0, 8 and 9.
-for index in (0, 8, 9):
+# MASTERS is a report as of 2026-10-21 ("not able to export master"): it
+# holds two LISTS rather than a form, and a chart of accounts is something
+# people ask you for. It is still input as far as `refresh_all` is concerned,
+# which is a different question - that one is about not wiping half-typed
+# fields.
+window.show_screen(8)
+settle()
+masters_report = window.current_report()
+check("Masters can be taken off the screen now",
+      masters_report is not None, True)
+check("as the ledgers and the groups, a sheet each",
+      [section.heading for section in masters_report.sections],
+      ["Ledgers", "Groups"])
+check("the ledgers carry every account, disabled ones included",
+      len(masters_report.sections[0].frame),
+      len(db.get_ledgers(include_inactive=True)))
+check("and the groups all 27 reserved plus any of your own",
+      len(masters_report.sections[1].frame), len(db.get_groups()))
+# `Closing` here is the ALL-TIME balance, not a balance as at a date, and
+# the period line has to say so rather than claim an "as at".
+check("the period line does not claim to be as at anything",
+      "as at" in masters_report.period, False)
+masters_path = db.DATA_DIR / "masters.xlsx"
+desktop.export_report(masters_report, path=str(masters_path))
+book = openpyxl.load_workbook(masters_path)
+check("it exports a sheet per list", book.sheetnames, ["Ledgers", "Groups"])
+check("headed like every other report",
+      book["Ledgers"]["B2"].value, db.company_display_name())
+check("with the money columns formatted",
+      book["Ledgers"].cell(row=6, column=4).number_format,
+      desktop.EXCEL_MONEY)
+book.close()
+
+# Voucher Entry and Company hold INPUT, so there is nothing to print.
+# Outstanding and GST moved in at 6 and 7 and ARE reports, and Masters at 8
+# became one on 2026-10-21 - so the input screens are now just 0 and 9.
+for index in (0, 9):
     window.show_screen(index)
     settle()
     check(f"screen {index} ({window.screens[index][0]}) is not a report",
@@ -1371,8 +1416,10 @@ check("and so is GST", window.current_report().title.startswith("GST"), True)
 # Back to an input screen BEFORE the calls below. They are here to prove
 # print/export are harmless when there is nothing to print - and on a report
 # screen print_current() opens the print preview, which blocks for ever with
-# nobody to dismiss it.
-window.show_screen(8)
+# nobody to dismiss it. **Company, not Masters**: 8 was an input screen until
+# Masters became a report, and leaving it here hung the whole suite on a
+# preview dialog nobody could close.
+window.show_screen(9)
 settle()
 window.print_current()          # must not raise, and must not print
 window.export_current()
@@ -1996,6 +2043,11 @@ settle()
 db.add_group("Scooter Loan", "Loans (Liability)")
 m.refresh()
 settle()
+# A group you have just made has to be offerable, or the only way to file a
+# ledger under it is to type the name out again from memory.
+check("a new group reaches both dropdowns on a refresh",
+      all("Scooter Loan" in [box.itemText(i) for i in range(box.count())]
+          for box in (m.led_group, m.grp_parent)), True)
 grows = {m.group_table.item(r, 0).text(): r
          for r in range(m.group_table.rowCount())}
 m.group_table.setCurrentCell(grows["Scooter Loan"], 0)

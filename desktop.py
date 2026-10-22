@@ -4558,6 +4558,13 @@ class MastersScreen(QtWidgets.QWidget):
         self._editing_ledger: str | None = None
         self._editing_active = True
         self._editing_group: str | None = None
+        self._shown: dict[str, pd.DataFrame] = {}
+        # A chart of accounts IS something you hand to somebody - an
+        # accountant asking "what are your ledgers?" (user asked 2026-10-21:
+        # "not able to export master"). This screen is still input, which is
+        # why `refresh_all` leaves it alone, but the two lists on it are as
+        # exportable as any report.
+        layout.addWidget(ReportActions(self.report))
         self.refresh()
 
     def refresh(self) -> None:
@@ -4577,14 +4584,21 @@ class MastersScreen(QtWidgets.QWidget):
         self._ledger_names = list(ledgers["name"])
 
         groups = db.get_groups()
-        self.group_table.load(pd.DataFrame({
+        group_view = pd.DataFrame({
             "Group": groups["name"],
             "Under": groups["parent_name"].fillna("—"),
             "Nature": groups["nature"],
             "Trading": groups["affects_gross"].map({1: "yes", 0: ""}),
             "Reserved": groups["is_reserved"].map({1: "yes", 0: ""}),
-        }), keys=groups["name"])
+        })
+        self.group_table.load(group_view, keys=groups["name"])
         self._group_names = list(groups["name"])
+        # Kept for print and export: exactly what is on the two tabs.
+        self._shown = {"Ledgers": view, "Groups": group_view}
+        # THE PICK LISTS MUST BE REFILLED HERE, at the end of the refresh -
+        # this is the only place that fills them, and both boxes are EDITABLE,
+        # so losing the list leaves them looking like working combos with
+        # nothing in them. Keep it inside `refresh`.
         names = list(groups["name"])
         for box in (self.led_group, self.grp_parent):
             current = box.currentText()
@@ -4594,6 +4608,28 @@ class MastersScreen(QtWidgets.QWidget):
             if current in names:
                 box.setCurrentText(current)
             box.blockSignals(False)
+
+    def report(self) -> Report:
+        """The chart of accounts: the ledgers, then the groups.
+
+        A sheet each, since they are two different tables rather than two
+        sides of one statement - which is what `two_sided` is for.
+
+        `Closing` here is the ALL-TIME balance, as it is on screen, not a
+        balance as at some date. The period line says so outright: a figure
+        headed "as at" that is not as at anything would be worse than no
+        heading.
+        """
+        return Report(
+            title="Masters",
+            period=f"every account, with balances to "
+                   f"{db.show_date(date.today())}",
+            sections=[ReportSection("Ledgers", self._shown.get(
+                          "Ledgers", pd.DataFrame()), ("Opening", "Closing")),
+                      ReportSection("Groups", self._shown.get(
+                          "Groups", pd.DataFrame()))],
+            notes=[f"{len(self._shown.get('Ledgers', []))} ledgers, "
+                   f"{len(self._shown.get('Groups', []))} groups."])
 
     def _warn(self, exc: Exception) -> None:
         QtWidgets.QMessageBox.warning(self, "Cannot do that", str(exc))
@@ -5553,8 +5589,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def current_report(self) -> Report | None:
         """What the screen in front of you would print, if it is a report.
 
-        Voucher Entry, Masters and Company are not reports - they are input -
-        so Ctrl+P on them says so rather than printing something arbitrary.
+        Voucher Entry and Company are not - they are input, so Ctrl+P on
+        them says so rather than printing something arbitrary. MASTERS now
+        is: it holds two lists rather than a form, and a chart of accounts is
+        something people ask you for (user asked 2026-10-21). It is still
+        input for `refresh_all`'s purposes, which is a different question -
+        that is about not wiping half-typed fields.
         """
         screen = self.screens[self.stack.currentIndex()][1]
         source = getattr(screen, "report", None)
@@ -5563,7 +5603,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _not_a_report(self) -> None:
         self.statusBar().showMessage(
             "This screen is not a report - open Day Book, Ledger, Trial "
-            "Balance, Profit & Loss or Balance Sheet first.", 6000)
+            "Balance, Profit & Loss, Balance Sheet or Masters first.", 6000)
 
     def print_current(self) -> None:
         report = self.current_report()

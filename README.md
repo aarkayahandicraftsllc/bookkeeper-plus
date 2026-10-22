@@ -443,7 +443,7 @@ Balances are held **debit-positive** internally: `+500` is 500 Dr, `-500` is
 | **Trial Balance** | Closing balances as Dr and Cr, by ledger or summarised by group, with or without **accounts standing at nil**. The total is a bar under the table, so the table itself can be sorted. **Double-click an account to read its ledger.** |
 | **Profit & Loss** | Trading account → gross profit, then the indirect accounts → net profit. |
 | **Balance Sheet** | Liabilities and assets side by side, with net profit carried to Profit & Loss A/c. Summary, or **the accounts under each heading**. |
-| **Masters** | Create and alter ledgers and sub-groups. |
+| **Masters** | Create and alter ledgers and sub-groups. Printable and exportable as a chart of accounts — a sheet of ledgers, a sheet of groups. |
 | **Company** | Who the books belong to: name, address, PAN, GSTIN, TAN, CIN, financial year, currency. |
 
 ### Coming back out
@@ -612,8 +612,11 @@ reports from opening.
 ## Printing and exporting
 
 Every report screen carries **Print…** (`Ctrl+P`) and **Export…** (`Ctrl+E`),
-also under the **Report** menu. A report nobody can get out of the window is
-half a report — it has to reach an auditor, a bank, or an email.
+also under the **Report** menu — **Masters included**, since a chart of
+accounts is something people ask you for. Voucher Entry and Company are forms
+rather than lists and say so instead of printing something arbitrary. A report
+nobody can get out of the window is half a report — it has to reach an auditor,
+a bank, or an email.
 
 **Print** opens a **preview** rather than going straight to a print dialog:
 these are wide tables, and whether one fits the page is the first thing anybody
