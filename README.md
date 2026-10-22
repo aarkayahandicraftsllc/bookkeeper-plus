@@ -405,9 +405,32 @@ padded, and often with a space as its thousands separator — frequently a
 > whose amount is zero is left out of the voucher, so a thousand pasted into a
 > cell was a thousand that quietly never happened.
 
-An amount you **type** is left exactly as you typed it — a cell that reformats
-itself under you is its own annoyance — and anything still unreadable after the
-spaces come off keeps its text rather than turning into a confident `0.00`.
+**Decoration comes off too.** A currency sign (`₹1,000`, `$1,000`, `Rs.1,000`),
+the brackets an accountant puts round a negative (`(500)`), the `/-` an Indian
+invoice ends with, and whatever else a statement decorates a figure with are
+all removed. A **European decimal comma** is read as one when the figure says
+so unambiguously: `1.000,00` is a thousand, because the comma comes last. One
+separator on its own keeps the reading it has always had — `1,000` is a
+thousand and `1.000` is one — since nothing in the text tells those apart.
+
+> Brackets are **removed, not read as a minus**: in the voucher grid the side
+> is the *column*, so Cr 500 is `500` in the credit column. A minus that
+> *leads* still means what it always has.
+
+A **`Dr` / `Cr` marker** is read as a claim about the side — this app's own
+ledger `Balance` column reads `88,000.00 Dr`, so a figure copied from one of
+its screens arrives wearing one. It is accepted when it agrees with the column
+it lands in and **refused when it contradicts it**: `500 Cr` dropped into the
+debit column is not 500 Dr, and taking the number while throwing the word away
+would post the wrong side of an entry.
+
+A **letter still means "not a figure"**, which is what keeps the removal from
+swallowing words: `NIL` and `1e5` are not amounts. Anything unreadable keeps
+its text rather than turning into a confident `0.00`.
+
+Every amount is **tidied to two decimals and thousands separators** once
+entered, typed as well as pasted. It runs when the cell is committed rather
+than on each keystroke, so it cannot fight a half-typed number.
 
 ## Structure
 

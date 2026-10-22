@@ -159,30 +159,123 @@ def squeeze(text: str) -> str:
     return "".join((text or "").split())
 
 
-def read_amount(text: str) -> float | None:
+# Which side each of the two amount columns is. A figure pasted with a Dr/Cr
+# marker on it is making a CLAIM about its side, and the claim has to agree
+# with the column it has been dropped into.
+COLUMN_SIDE = {1: "Dr", 2: "Cr"}
+
+# Anything that is not part of a figure. A currency sign, the brackets an
+# accountant puts round a negative, the "/-" an Indian invoice ends with, a
+# stray bullet or asterisk off a statement - all of it comes off (user asked
+# 2026-10-21: "remove special characters, brackets or currency sign while
+# pasting the amounts"). The minus is NOT in here: it is read first, where it
+# leads, and dropped anywhere else.
+_DECORATION = re.compile(r"[^0-9.,]")
+
+# A currency written as letters rather than as a sign. These have to be named
+# to be removed, because the general rule is that a leftover letter means
+# "not a figure" - which is what keeps "NIL" and "1e5" out of the books. Both
+# of this user's books are here: rupees, and the US company's dollars.
+_CURRENCY_WORDS = ("rs", "inr", "rupees", "usd", "eur", "gbp")
+
+
+def _strip_currency_word(text: str) -> str:
+    """Take a currency written in letters off either end: "Rs.1,000"."""
+    low = text.lower()
+    for word in _CURRENCY_WORDS:
+        if low.startswith(word):
+            return text[len(word):].lstrip(".")
+        if low.endswith(word):
+            return text[:-len(word)].rstrip(".")
+    return text
+
+
+def _side_marker(text: str) -> tuple[str, str | None]:
+    """Split a Dr/Cr marker off a figure: "88,000.00 Dr" -> the two parts.
+
+    Taken at either end, and a full stop after it ("500 Dr.") goes with it.
+    This app's OWN ledger Balance column reads "88,000.00 Dr", so a figure
+    copied from one screen of it and pasted into another arrives this way.
+    """
+    body = text[:-1] if text.endswith(".") else text
+    low = body.lower()
+    for marker in ("dr", "cr"):
+        if low.endswith(marker):
+            return body[:-2], marker.capitalize()
+        if low.startswith(marker):
+            return body[2:], marker.capitalize()
+    return text, None
+
+
+def read_amount(text: str, side: str | None = None) -> float | None:
     """The figure a cell holds, or None if it does not hold one.
 
     Kept apart from `parse_amount`, which answers 0.0 both for "empty" and
     for "nonsense". That is right for adding a column up and wrong for
     deciding whether to tidy a cell: **0.00 is a figure and "abc" is not**,
     and only one of them should be rewritten.
+
+    `side` is the column the figure is going into, "Dr" or "Cr". A figure
+    carrying the OPPOSITE marker is refused rather than read: "500 Cr"
+    dropped into the Debit column is not 500 Dr, and taking the number and
+    throwing the word away would post the wrong side of an entry. **A marker
+    is refused where there is no `side` to check it against, too** - the fork
+    reads amounts from boxes that have no side at all (a bill allocation, a
+    GST rate), and a claim nobody can check is not a figure.
+
+    **Decoration comes off, letters do not.** A currency sign or a bracket is
+    packaging round a figure; a letter is either a word ("NIL") or a marker
+    that has just been dealt with, and silently dropping it would turn "1e5"
+    into 15. So a leftover letter means this is not a figure at all.
     """
-    cleaned = squeeze(text).replace(",", "")
+    cleaned = squeeze(text)
+    if not cleaned:
+        return None
+    cleaned, marker = _side_marker(cleaned)
+    if marker and marker != side:
+        return None
+    cleaned = _strip_currency_word(cleaned)
+    if any(char.isalpha() for char in _DECORATION.findall(cleaned)):
+        return None
+    # Brackets are the accountant's minus sign, and they are simply removed:
+    # in this grid the SIDE is the column, so Cr 500 is "500" in the credit
+    # column, never "(500)". A minus that LEADS is left to mean what it
+    # always has; one anywhere else is punctuation ("1,000/-").
+    negative = cleaned.startswith("-")
+    cleaned = _decimal_point(_DECORATION.sub("", cleaned))
     if not cleaned:
         return None
     try:
-        return round(float(cleaned), 2)
+        value = round(float(cleaned), 2)
     except ValueError:
         return None
+    return -value if negative else value
 
 
-def parse_amount(text: str) -> float:
+def _decimal_point(figure: str) -> str:
+    """Settle which of `.` and `,` is the decimal point, and drop the other.
+
+    Only the UNAMBIGUOUS case is new: when both appear, the LAST one is the
+    decimal point, so "1.000,00" is a thousand written the European way and
+    "1,23,456.78" is a lakh written the Indian way. One separator on its own
+    keeps the reading it has always had here - "1,000" is a thousand, and
+    "1.000" is one - because nothing in the text can tell those apart and
+    guessing would change figures that are being read correctly today.
+    """
+    if "." in figure and "," in figure:
+        if figure.rfind(",") > figure.rfind("."):
+            return figure.replace(".", "").replace(",", ".")
+        return figure.replace(",", "")
+    return figure.replace(",", "")
+
+
+def parse_amount(text: str, side: str | None = None) -> float:
     """Read an amount typed or pasted, with or without separators.
 
     Blank means zero. So, still, does anything unreadable - see `squeeze` for
     what that costs and why whitespace in particular is no longer unreadable.
     """
-    amount = read_amount(text)
+    amount = read_amount(text, side)
     return 0.0 if amount is None else amount
 
 
@@ -2198,9 +2291,11 @@ class VoucherScreen(QtWidgets.QWidget):
             combo = self.grid.cellWidget(row, 0)
             name = self._ledger_named(combo.currentText() if combo else "")
             debit = parse_amount(self.grid.item(row, 1).text()
-                                 if self.grid.item(row, 1) else "")
+                                 if self.grid.item(row, 1) else "",
+                                 COLUMN_SIDE[1])
             credit = parse_amount(self.grid.item(row, 2).text()
-                                  if self.grid.item(row, 2) else "")
+                                  if self.grid.item(row, 2) else "",
+                                  COLUMN_SIDE[2])
             if not name or (not debit and not credit):
                 continue
             # The allocations hang off the row's own combo widget, so they
@@ -2341,8 +2436,9 @@ class VoucherScreen(QtWidgets.QWidget):
             credit = self.grid.item(row, 2)
             running[name] = round(
                 running.get(name, 0.0)
-                + parse_amount(debit.text() if debit else "")
-                - parse_amount(credit.text() if credit else ""), 2)
+                + parse_amount(debit.text() if debit else "", COLUMN_SIDE[1])
+                - parse_amount(credit.text() if credit else "",
+                               COLUMN_SIDE[2]), 2)
             cell.setText(acc.fmt_side(running[name]))
 
     def _tidy_amount(self, item) -> None:
@@ -2374,7 +2470,7 @@ class VoucherScreen(QtWidgets.QWidget):
         text = item.text()
         if not text.strip():
             return
-        amount = read_amount(text)
+        amount = read_amount(text, COLUMN_SIDE[item.column()])
         wanted = squeeze(text) if amount is None else f"{amount:,.2f}"
         if wanted == text:
             return
@@ -2441,8 +2537,9 @@ class VoucherScreen(QtWidgets.QWidget):
         for index in range(self.grid.rowCount()):
             debit = self.grid.item(index, 1)
             credit = self.grid.item(index, 2)
-            gap += parse_amount(debit.text() if debit else "")
-            gap -= parse_amount(credit.text() if credit else "")
+            gap += parse_amount(debit.text() if debit else "", COLUMN_SIDE[1])
+            gap -= parse_amount(credit.text() if credit else "",
+                                COLUMN_SIDE[2])
         gap = round(gap, 2)
 
         self._suggesting = True
@@ -2755,9 +2852,11 @@ class VoucherScreen(QtWidgets.QWidget):
 
     def _row_amount(self, row: int) -> float:
         debit = parse_amount(self.grid.item(row, 1).text()
-                             if self.grid.item(row, 1) else "")
+                             if self.grid.item(row, 1) else "",
+                             COLUMN_SIDE[1])
         credit = parse_amount(self.grid.item(row, 2).text()
-                              if self.grid.item(row, 2) else "")
+                              if self.grid.item(row, 2) else "",
+                              COLUMN_SIDE[2])
         return round(debit - credit, 2)
 
     def _set_row_amount(self, row: int, signed: float) -> None:
@@ -2907,9 +3006,11 @@ class VoucherScreen(QtWidgets.QWidget):
         lid, name = found
         combo = self.grid.cellWidget(row, 0)
         debit = parse_amount(self.grid.item(row, 1).text()
-                             if self.grid.item(row, 1) else "")
+                             if self.grid.item(row, 1) else "",
+                             COLUMN_SIDE[1])
         credit = parse_amount(self.grid.item(row, 2).text()
-                              if self.grid.item(row, 2) else "")
+                              if self.grid.item(row, 2) else "",
+                              COLUMN_SIDE[2])
         amount = round(debit - credit, 2)
         if not amount:
             QtWidgets.QMessageBox.information(

@@ -2387,6 +2387,91 @@ check("and is posted at the figure that was pasted",
 v.reset()
 settle()
 
+print("\n23i2) And its decoration: currency signs, brackets, odd separators")
+# Asked 2026-10-21: "remove special characters, brackets or currency sign
+# while pasting the amounts". Each of these used to read as 0.00 (or, for the
+# European figure, as 1.00 - silently wrong rather than merely missing) and
+# the line was then dropped from the voucher without a word. The check
+# messages stay ASCII on purpose: the console here is cp1252 and a rupee sign
+# in a printed message kills the run.
+for text, want, how in [
+        ("₹1,000", 1000.0, "a rupee sign"),
+        ("$1,000", 1000.0, "a dollar sign"),
+        ("£ 1,234.56", 1234.56, "a pound sign and a space"),
+        ("Rs.1,000", 1000.0, "a currency written in letters"),
+        ("1,000/-", 1000.0, "the /- an Indian invoice ends with"),
+        ("*1,000*", 1000.0, "whatever a statement decorates it with"),
+        ("(500)", 500.0, "the brackets round a negative"),
+        ("(1,234.50)", 1234.5, "brackets with separators inside them"),
+        ("1.000,00", 1000.0, "a European decimal comma"),
+        ("€1.000,00", 1000.0, "a euro sign and a European comma"),
+        ("1,23,456.78", 123456.78, "Indian lakh grouping")]:
+    check(f"{how} comes off", desktop.parse_amount(text), want)
+
+# BRACKETS ARE REMOVED, NOT READ AS A MINUS, and that is right here: in this
+# grid the side is the COLUMN, so Cr 500 is "500" in the credit column. A
+# minus that LEADS still means what it always has; one anywhere else is
+# punctuation, which is what makes "1,000/-" above work.
+check("a leading minus is still a minus", desktop.parse_amount("-500"), -500.0)
+
+# A LETTER STILL MEANS "NOT A FIGURE". This is the line that keeps the
+# decoration rule from swallowing words: dropping letters blindly would read
+# "1e5" as 15 and "NIL" as nothing-in-particular.
+for text in ("NIL", "abc", "1e5", "-"):
+    check(f"{text!r} is not a figure", desktop.read_amount(text), None)
+
+# The AMBIGUOUS separators keep the reading they have always had, because
+# nothing in the text can tell them apart and guessing would move figures
+# that are read correctly today.
+check("one dot is still a decimal point", desktop.parse_amount("1.000"), 1.0)
+check("one comma is still a thousands separator",
+      desktop.parse_amount("1,000"), 1000.0)
+
+# A Dr/Cr MARKER IS A CLAIM ABOUT THE SIDE, and this app's own ledger
+# Balance column reads "88,000.00 Dr" - so a figure copied from one of its
+# screens into another arrives wearing one.
+check("the marker agreeing with the column is read",
+      desktop.read_amount("88,000.00 Dr", desktop.COLUMN_SIDE[1]), 88000.0)
+check("and so is one in the credit column",
+      desktop.read_amount("500 Cr", desktop.COLUMN_SIDE[2]), 500.0)
+check("a marker CONTRADICTING the column is refused, not silently taken",
+      desktop.read_amount("500 Cr", desktop.COLUMN_SIDE[1]), None)
+check("either way round", desktop.read_amount("88,000.00 Dr",
+                                              desktop.COLUMN_SIDE[2]), None)
+check("a marker at the front reads too",
+      desktop.read_amount("Dr 500", desktop.COLUMN_SIDE[1]), 500.0)
+# And refused where there is NO side to check it against. The fork reads
+# amounts from boxes that have no side at all - a bill allocation, a GST
+# rate - and a claim nobody can check is not a figure.
+check("a marker with no column to agree with is refused",
+      desktop.read_amount("500 Cr"), None)
+
+# End to end, which is the point: a decorated figure reaches the books as a
+# figure. The cell shows what it was read as, so the removal is visible
+# rather than something you have to trust.
+v.reset()
+settle()
+v.type_box.setCurrentText("Journal")
+set_row(v, 0, "Bank")
+v.grid.item(0, 1).setText("₹1,000")
+settle()
+check("the decorated cell is tidied to the plain figure",
+      v.grid.item(0, 1).text(), "1,000.00")
+set_row(v, 1, "Capital")
+v.grid.item(1, 2).setText("(1,000)")
+settle()
+check("and bracketed, on the other side", v.grid.item(1, 2).text(), "1,000.00")
+check("so the voucher balances", v.accept_button.isEnabled(), True)
+v.accept_voucher()
+settle()
+_head, decorated = db.get_voucher(db.last_voucher_id("Journal"))
+check("both lines reached the books",
+      sum(float(line["debit"]) for line in decorated), 1000.0)
+check("and nothing was dropped on the way",
+      len(decorated), 2)
+v.reset()
+settle()
+
 print("\n23j) Double-click an account on the Trial Balance to read its ledger")
 # Asked 2026-10-21: "if i double click on any account in trial balance it
 # should take me to ledger of that account".
